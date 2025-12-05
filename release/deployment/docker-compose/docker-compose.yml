@@ -81,6 +81,8 @@ services:
 
   redis:
     profiles: [ "redis" ]
+    ports:
+      - "${COZE_LOOP_REDIS_PORT}:6379"
     container_name: "coze-loop-redis"
     image: "${COZE_LOOP_REDIS_IMAGE_REGISTRY}/${COZE_LOOP_REDIS_IMAGE_REPOSITORY}/${COZE_LOOP_REDIS_IMAGE_NAME}:${COZE_LOOP_REDIS_IMAGE_TAG}"
     restart: always
@@ -101,6 +103,8 @@ services:
 
   mysql:
     profiles: [ "mysql" ]
+    ports:
+      - "${COZE_LOOP_MYSQL_PORT}:3306"
     container_name: "coze-loop-mysql"
     image: "${COZE_LOOP_MYSQL_IMAGE_REGISTRY}/${COZE_LOOP_MYSQL_IMAGE_REPOSITORY}/${COZE_LOOP_MYSQL_IMAGE_NAME}:${COZE_LOOP_MYSQL_IMAGE_TAG}"
     restart: always
