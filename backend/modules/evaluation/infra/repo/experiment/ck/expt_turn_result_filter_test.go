@@ -5,6 +5,7 @@ package ck
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -72,6 +73,14 @@ func TestExptTurnResultFilterDAOImpl_buildQueryConditions(t *testing.T) {
 						{Key: "4", Op: "LIKE", Values: []any{"4", "5"}},
 						{Key: "5", Op: "NOT LIKE", Values: []any{"5"}},
 						{Key: "6", Op: "NOT IN", Values: []any{"3"}},
+					},
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "total_latency", Op: "=", Values: []any{"100"}},
+						{Key: "input_tokens", Op: ">", Values: []any{"10"}},
+						{Key: "output_tokens", Op: "<=", Values: []any{"20"}},
+						{Key: "total_tokens", Op: "BETWEEN", Values: []any{"30", "40"}},
+						{Key: "input_tokens", Op: "IN", Values: []any{"50", "60"}},
+						{Key: "output_tokens", Op: "NOT IN", Values: []any{"70", "80"}},
 					},
 				},
 				ItemSnapshotCond: &ItemSnapshotFilter{
@@ -167,10 +176,9 @@ func TestExptTurnResultFilterDAOImpl_buildQueryConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotSelectClause, gotWhereClause, gotOrderClause, gotArgs := d.buildQueryConditions(ctx, tt.cond)
-			assert.NotNil(t, gotSelectClause)
-			assert.NotNil(t, gotWhereClause)
-			assert.NotNil(t, gotOrderClause)
+			whereSQL, keywordCond, gotArgs := d.buildQueryConditions(ctx, tt.cond)
+			assert.NotNil(t, whereSQL)
+			assert.NotNil(t, keywordCond)
 			assert.NotNil(t, gotArgs)
 		})
 	}
@@ -186,22 +194,18 @@ func TestExptTurnResultFilterDAOImpl_buildBaseSQL(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name              string
-		joinSQL           string
-		whereSQL          string
-		keywordCond       string
-		evalSetSyncCkDate string
-		args              *[]interface{}
-		want              string
+		name        string
+		whereSQL    string
+		keywordCond string
+		args        *[]interface{}
+		want        string
 	}{
 		{
-			name:              "empty_conditions",
-			joinSQL:           "1",
-			whereSQL:          "2",
-			keywordCond:       "3",
-			evalSetSyncCkDate: "4",
-			args:              &[]interface{}{},
-			want:              "生成的基础 SQL 预期值，需根据实际实现修改",
+			name:        "empty_conditions",
+			whereSQL:    "2",
+			keywordCond: "3",
+			args:        &[]interface{}{},
+			want:        "SELECT  etrf.item_id, etrf.status FROM `cozeloop-clickhouse`.expt_turn_result_filter etrf FINAL WHERE 1=123",
 		},
 	}
 
@@ -210,8 +214,8 @@ func TestExptTurnResultFilterDAOImpl_buildBaseSQL(t *testing.T) {
 			mockConfig.EXPECT().GetCKDBName(gomock.Any()).Return(&entity.CKDBConfig{
 				ExptTurnResultFilterDBName: "ck",
 			}).AnyTimes()
-			got := d.buildBaseSQL(ctx, tt.joinSQL, tt.whereSQL, tt.keywordCond, tt.evalSetSyncCkDate, tt.args)
-			assert.NotNil(t, got)
+			got := d.buildBaseSQL(ctx, tt.whereSQL, tt.keywordCond, tt.args)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -238,15 +242,13 @@ func TestExptTurnResultFilterDAOImpl_appendPaginationArgs(t *testing.T) {
 				},
 			},
 			args: []interface{}{},
-			want: "生成的基础 SQL 预期值，需根据实际实现修改",
+			want: "LIMIT 10 OFFSET 0",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			args := d.appendPaginationArgs(tt.args, tt.cond)
-			if len(args) != 2 {
-				t.Errorf("appendPaginationArgs failed, args len not equal 2, args: %v", args)
-			}
+			assert.Equal(t, tt.want, fmt.Sprintf("LIMIT %d OFFSET %d", args[len(args)-2], args[len(args)-1]))
 		})
 	}
 }
@@ -278,11 +280,11 @@ func TestExptTurnResultFilterDAOImpl_buildGetByExptIDItemIDsSQL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockConfig.EXPECT().GetCKDBName(gomock.Any()).Return(&entity.CKDBConfig{
 				ExptTurnResultFilterDBName: "ck",
-			})
+			}).AnyTimes()
 			got, args := d.buildGetByExptIDItemIDsSQL(ctx, tt.spaceID, tt.exptID, tt.createdDate, tt.itemIDs)
 			assert.NotNil(t, got)
 			if len(args) != 4 {
-				t.Errorf("buildGetByExptIDItemIDsSQL failed, args len not equal 3, args: %v", args)
+				t.Errorf("buildGetByExptIDItemIDsSQL failed, args len not equal 4, args: %v", args)
 			}
 		})
 	}
@@ -310,6 +312,106 @@ func TestExptTurnResultFilterDAOImpl_parseOutput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := parseOutput(ctx, tt.args)
 			assert.NotNil(t, got)
+		})
+	}
+}
+
+func TestExptTurnResultFilterDAOImpl_buildMapFieldConditions_EvalTargetMetricsFilters(t *testing.T) {
+	d := &exptTurnResultFilterDAOImpl{}
+
+	tests := []struct {
+		name     string
+		cond     *ExptTurnResultFilterQueryCond
+		wantSQL  string
+		wantArgs int
+	}{
+		{
+			name: "eval_target_metrics_equal",
+			cond: &ExptTurnResultFilterQueryCond{
+				MapCond: &ExptTurnResultFilterMapCond{
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "total_latency", Op: "=", Values: []any{"100"}},
+					},
+				},
+			},
+			wantSQL:  " AND etrf.eval_target_metrics['total_latency'] = ?",
+			wantArgs: 1,
+		},
+		{
+			name: "eval_target_metrics_comparison_ops",
+			cond: &ExptTurnResultFilterQueryCond{
+				MapCond: &ExptTurnResultFilterMapCond{
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "input_tokens", Op: ">", Values: []any{"10"}},
+						{Key: "output_tokens", Op: ">=", Values: []any{"20"}},
+						{Key: "total_tokens", Op: "<", Values: []any{"30"}},
+						{Key: "total_latency", Op: "<=", Values: []any{"40"}},
+						{Key: "input_tokens", Op: "!=", Values: []any{"50"}},
+					},
+				},
+			},
+			wantSQL:  " AND etrf.eval_target_metrics['input_tokens'] > ? AND etrf.eval_target_metrics['output_tokens'] >= ? AND etrf.eval_target_metrics['total_tokens'] < ? AND etrf.eval_target_metrics['total_latency'] <= ? AND etrf.eval_target_metrics['input_tokens'] != ?",
+			wantArgs: 5,
+		},
+		{
+			name: "eval_target_metrics_between",
+			cond: &ExptTurnResultFilterQueryCond{
+				MapCond: &ExptTurnResultFilterMapCond{
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "total_tokens", Op: "BETWEEN", Values: []any{"100", "200"}},
+					},
+				},
+			},
+			wantSQL:  " AND etrf.eval_target_metrics['total_tokens'] BETWEEN ? AND ?",
+			wantArgs: 2,
+		},
+		{
+			name: "eval_target_metrics_in",
+			cond: &ExptTurnResultFilterQueryCond{
+				MapCond: &ExptTurnResultFilterMapCond{
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "input_tokens", Op: "IN", Values: []any{"10", "20", "30"}},
+					},
+				},
+			},
+			wantSQL:  " AND etrf.eval_target_metrics['input_tokens'] IN ?",
+			wantArgs: 1,
+		},
+		{
+			name: "eval_target_metrics_not_in",
+			cond: &ExptTurnResultFilterQueryCond{
+				MapCond: &ExptTurnResultFilterMapCond{
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "output_tokens", Op: "NOT IN", Values: []any{"40", "50"}},
+					},
+				},
+			},
+			wantSQL:  " AND etrf.eval_target_metrics['output_tokens'] NOT IN ?",
+			wantArgs: 1,
+		},
+		{
+			name: "eval_target_metrics_invalid_value",
+			cond: &ExptTurnResultFilterQueryCond{
+				MapCond: &ExptTurnResultFilterMapCond{
+					EvalTargetMetricsFilters: []*FieldFilter{
+						{Key: "total_latency", Op: "=", Values: []any{"invalid"}},
+					},
+				},
+			},
+			wantSQL:  "",
+			wantArgs: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			whereSQL := ""
+			args := []interface{}{}
+			d.buildMapFieldConditions(tt.cond, &whereSQL, &args)
+			if tt.wantSQL != "" {
+				assert.Contains(t, whereSQL, tt.wantSQL)
+			}
+			assert.Equal(t, tt.wantArgs, len(args))
 		})
 	}
 }

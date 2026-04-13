@@ -58,7 +58,7 @@ func EvalTargetVersionDO2PO(do *entity.EvalTargetVersion) (po *model.TargetVersi
 		if err != nil {
 			return nil, err
 		}
-	case entity.EvalTargetTypeVolcengineAgent:
+	case entity.EvalTargetTypeVolcengineAgent, entity.EvalTargetTypeVolcengineAgentAgentkit:
 		meta, err = json.Marshal(do.VolcengineAgent)
 		if err != nil {
 			return nil, err
@@ -68,6 +68,7 @@ func EvalTargetVersionDO2PO(do *entity.EvalTargetVersion) (po *model.TargetVersi
 		if err != nil {
 			return nil, err
 		}
+	default:
 	}
 	if do.InputSchema != nil {
 		inputSchema, err = json.Marshal(do.InputSchema)
@@ -120,7 +121,7 @@ func EvalTargetPO2DOs(targetPOs []*model.Target) (targetDOs []*entity.EvalTarget
 
 func EvalTargetPO2DO(targetPO *model.Target) (targetDO *entity.EvalTarget) {
 	if targetPO == nil {
-		return
+		return targetDO
 	}
 	targetDO = &entity.EvalTarget{}
 	targetDO.ID = targetPO.ID
@@ -142,12 +143,12 @@ func EvalTargetPO2DO(targetPO *model.Target) (targetDO *entity.EvalTarget) {
 		targetDO.BaseInfo.DeletedAt = gptr.Of(targetPO.DeletedAt.Time.UnixMilli())
 	}
 
-	return
+	return targetDO
 }
 
 func EvalTargetVersionPO2DO(targetVersionPO *model.TargetVersion, targetType entity.EvalTargetType) (targetVersionDO *entity.EvalTargetVersion) {
 	if targetVersionPO == nil {
-		return
+		return targetVersionDO
 	}
 	targetVersionDO = &entity.EvalTargetVersion{}
 	targetVersionDO.ID = targetVersionPO.ID
@@ -173,7 +174,7 @@ func EvalTargetVersionPO2DO(targetVersionPO *model.TargetVersion, targetType ent
 	if targetVersionPO.InputSchema != nil {
 		schema := make([]*entity.ArgsSchema, 0)
 		if err := json.Unmarshal(*targetVersionPO.InputSchema, &schema); err != nil {
-			return
+			return targetVersionDO
 		}
 		targetVersionDO.InputSchema = schema
 	}
@@ -200,7 +201,7 @@ func EvalTargetVersionPO2DO(targetVersionPO *model.TargetVersion, targetType ent
 			if err := json.Unmarshal(*targetVersionPO.TargetMeta, meta); err == nil {
 				targetVersionDO.CozeWorkflow = meta
 			}
-		case entity.EvalTargetTypeVolcengineAgent:
+		case entity.EvalTargetTypeVolcengineAgent, entity.EvalTargetTypeVolcengineAgentAgentkit:
 			meta := &entity.VolcengineAgent{}
 			if err := json.Unmarshal(*targetVersionPO.TargetMeta, meta); err == nil {
 				targetVersionDO.VolcengineAgent = meta

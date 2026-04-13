@@ -9,13 +9,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/coze-dev/coze-loop/backend/modules/evaluation/pkg/errno"
+
 	"github.com/bytedance/gg/gptr"
 	"github.com/coze-dev/coze-loop/backend/infra/middleware/session"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain/common"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain/eval_set"
-	eval_target_d "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain/eval_target"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain/expt"
-	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/eval_target"
 	dataset0 "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/dataset"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/task"
 	tconv "github.com/coze-dev/coze-loop/backend/modules/observability/application/convertor/task"
@@ -34,36 +34,39 @@ import (
 	"github.com/spf13/cast"
 )
 
-var _ taskexe.Processor = (*AutoEvaluteProcessor)(nil)
+var _ taskexe.Processor = (*AutoEvaluateProcessor)(nil)
 
-type AutoEvaluteProcessor struct {
+type AutoEvaluateProcessor struct {
 	evalSvc               rpc.IEvaluatorRPCAdapter
 	evaluationSvc         rpc.IEvaluationRPCAdapter
 	datasetServiceAdaptor *service.DatasetServiceAdaptor
 	taskRepo              repo.ITaskRepo
 	aid                   int32
+	evalTargetBuilder     EvalTargetBuilder
 }
 
-func NewAutoEvaluteProcessor(
+func NewAutoEvaluateProcessor(
 	aid int32,
 	datasetServiceProvider *service.DatasetServiceAdaptor,
 	evalService rpc.IEvaluatorRPCAdapter,
 	evaluationService rpc.IEvaluationRPCAdapter,
 	taskRepo repo.ITaskRepo,
-) *AutoEvaluteProcessor {
-	return &AutoEvaluteProcessor{
+	evalTargetBuilder EvalTargetBuilder,
+) *AutoEvaluateProcessor {
+	return &AutoEvaluateProcessor{
 		datasetServiceAdaptor: datasetServiceProvider,
 		evalSvc:               evalService,
 		evaluationSvc:         evaluationService,
 		taskRepo:              taskRepo,
 		aid:                   aid,
+		evalTargetBuilder:     evalTargetBuilder,
 	}
 }
 
-func (p *AutoEvaluteProcessor) ValidateConfig(ctx context.Context, config any) error {
+func (p *AutoEvaluateProcessor) ValidateConfig(ctx context.Context, config any) error {
 	cfg, ok := config.(*task_entity.ObservabilityTask)
 	if !ok {
-		return taskexe.ErrInvalidConfig
+		return errorx.NewByCode(obErrorx.CommonInvalidParamCode)
 	}
 	if cfg.EffectiveTime != nil {
 		startAt := cfg.EffectiveTime.StartAt
@@ -96,7 +99,7 @@ func (p *AutoEvaluteProcessor) ValidateConfig(ctx context.Context, config any) e
 	return nil
 }
 
-func (p *AutoEvaluteProcessor) Invoke(ctx context.Context, trigger *taskexe.Trigger) error {
+func (p *AutoEvaluateProcessor) Invoke(ctx context.Context, trigger *taskexe.Trigger) error {
 	taskRun := tconv.TaskRunDO2DTO(ctx, trigger.TaskRun, nil)
 	if taskRun.GetTaskRunConfig().GetAutoEvaluateRunConfig() == nil {
 		return nil
@@ -109,7 +112,7 @@ func (p *AutoEvaluteProcessor) Invoke(ctx context.Context, trigger *taskexe.Trig
 	}
 	turns := buildItems(ctx, []*loop_span.Span{trigger.Span}, mapping, taskRun.GetTaskRunConfig().GetAutoEvaluateRunConfig().GetSchema(), strconv.FormatInt(taskRun.ID, 10))
 	if len(turns) == 0 {
-		logs.CtxInfo(ctx, "[task-debug] AutoEvaluteProcessor Invoke, turns is empty")
+		logs.CtxInfo(ctx, "[task-debug] AutoEvaluateProcessor Invoke, turns is empty")
 		return nil
 	}
 	taskTTL := trigger.Task.GetTaskttl()
@@ -117,14 +120,14 @@ func (p *AutoEvaluteProcessor) Invoke(ctx context.Context, trigger *taskexe.Trig
 	_ = p.taskRepo.IncrTaskRunCount(ctx, trigger.Task.ID, taskRun.ID, taskTTL)
 	taskCount, _ := p.taskRepo.GetTaskCount(ctx, trigger.Task.ID)
 	taskRunCount, _ := p.taskRepo.GetTaskRunCount(ctx, trigger.Task.ID, taskRun.ID)
-	if (trigger.Task.Sampler.CycleCount != 0 && taskRunCount > trigger.Task.Sampler.CycleCount) ||
+	if (trigger.Task.Sampler.IsCycle && trigger.Task.Sampler.CycleCount != 0 && taskRunCount > trigger.Task.Sampler.CycleCount) ||
 		(taskCount > trigger.Task.Sampler.SampleSize) {
-		logs.CtxInfo(ctx, "[task-debug] AutoEvaluteProcessor Invoke, subCount:%v,taskCount:%v", taskRunCount, taskCount)
+		logs.CtxInfo(ctx, "[task-debug] AutoEvaluateProcessor Invoke, subCount:%v,taskCount:%v", taskRunCount, taskCount)
 		_ = p.taskRepo.DecrTaskCount(ctx, trigger.Task.ID, taskTTL)
 		_ = p.taskRepo.DecrTaskRunCount(ctx, trigger.Task.ID, taskRun.ID, taskTTL)
 		return nil
 	}
-	_, err := p.evaluationSvc.InvokeExperiment(ctx, &rpc.InvokeExperimentReq{
+	addedItems, err := p.evaluationSvc.InvokeExperiment(ctx, &rpc.InvokeExperimentReq{
 		WorkspaceID:     workspaceID,
 		EvaluationSetID: taskRun.GetTaskRunConfig().GetAutoEvaluateRunConfig().GetEvalID(),
 		Items: []*eval_set.EvaluationSetItem{
@@ -142,81 +145,101 @@ func (p *AutoEvaluteProcessor) Invoke(ctx context.Context, trigger *taskexe.Trig
 		ExperimentRunID:  gptr.Of(taskRun.GetTaskRunConfig().GetAutoEvaluateRunConfig().GetExptRunID()),
 		Session:          sessionInfo,
 		Ext: map[string]string{
-			"workspace_id": strconv.FormatInt(trigger.Task.WorkspaceID, 10),
-			"span_id":      trigger.Span.SpanID,
-			"task_id":      cast.ToString(trigger.Task.ID),
-			"task_run_id":  cast.ToString(taskRun.ID),
+			"workspace_id":    strconv.FormatInt(trigger.Task.WorkspaceID, 10),
+			"span_id":         trigger.Span.SpanID,
+			"task_id":         cast.ToString(trigger.Task.ID),
+			"task_run_id":     cast.ToString(taskRun.ID),
+			"span_start_time": cast.ToString(trigger.Span.StartTime/1000 - time.Hour.Milliseconds()),
+			"span_end_time":   cast.ToString(trigger.Span.StartTime/1000 + time.Hour.Milliseconds()),
+			"platform_type":   string(trigger.Task.GetPlatformType()),
 		},
 	})
 	if err != nil {
 		_ = p.taskRepo.DecrTaskCount(ctx, trigger.Task.ID, taskTTL)
 		_ = p.taskRepo.DecrTaskRunCount(ctx, trigger.Task.ID, taskRun.ID, taskTTL)
+		// 实验已失败，终止此轮自动化任务，避免后续 span 继续触发链路
+		if statusErr, ok := errorx.FromStatusError(err); ok {
+			if statusErr.Code() == errno.ExperimentStatusNotAllowedToInvokeCode {
+				logs.CtxWarn(ctx, "[task-debug] experiment already failed (code=%d), terminate task_id=%d, trace_id=%v", statusErr.Code(), trigger.Task.ID, trigger.Span.TraceID)
+				// 仅置 task run 为终态 因为即使是不循环的任务也可能同时包含 NewData && Backfill
+				err := p.onTaskRunTerminated(ctx, trigger.TaskRun)
+				if err != nil {
+					logs.CtxError(ctx, "[task-debug] onTaskRunTerminated failed, err: %v", err)
+					return err
+				}
+			}
+		}
 		return err
+	}
+	if addedItems <= 0 {
+		_ = p.taskRepo.DecrTaskCount(ctx, trigger.Task.ID, taskTTL)
+		_ = p.taskRepo.DecrTaskRunCount(ctx, trigger.Task.ID, taskRun.ID, taskTTL)
+		return nil
 	}
 	return nil
 }
 
-func (p *AutoEvaluteProcessor) OnCreateTaskChange(ctx context.Context, currentTask *task_entity.ObservabilityTask) error {
+func (p *AutoEvaluateProcessor) OnTaskCreated(ctx context.Context, currentTask *task_entity.ObservabilityTask) error {
 	taskRuns, err := p.taskRepo.GetBackfillTaskRun(ctx, nil, currentTask.ID)
 	if err != nil {
 		logs.CtxError(ctx, "GetBackfillTaskRun failed, taskID:%d, err:%v", currentTask.ID, err)
 		return err
 	}
 	if ShouldTriggerBackfill(currentTask) && taskRuns == nil {
-		err = p.OnCreateTaskRunChange(ctx, taskexe.OnCreateTaskRunChangeReq{
+		err = p.OnTaskRunCreated(ctx, taskexe.OnTaskRunCreatedReq{
 			CurrentTask: currentTask,
-			RunType:     task.TaskRunTypeBackFill,
+			RunType:     task_entity.TaskRunTypeBackFill,
 			RunStartAt:  time.Now().UnixMilli(),
 			RunEndAt:    time.Now().UnixMilli() + (currentTask.BackfillEffectiveTime.EndAt - currentTask.BackfillEffectiveTime.StartAt),
 		})
 		if err != nil {
-			logs.CtxError(ctx, "OnCreateTaskChange failed, taskID:%d, err:%v", currentTask.ID, err)
+			logs.CtxError(ctx, "OnTaskCreated failed, taskID:%d, err:%v", currentTask.ID, err)
 			return err
 		}
-		err = p.OnUpdateTaskChange(ctx, currentTask, task.TaskStatusRunning)
+		err = p.OnTaskUpdated(ctx, currentTask, task.TaskStatusRunning)
 		if err != nil {
-			logs.CtxError(ctx, "OnCreateTaskChange failed, taskID:%d, err:%v", currentTask.ID, err)
+			logs.CtxError(ctx, "OnTaskCreated failed, taskID:%d, err:%v", currentTask.ID, err)
 			return err
 		}
 	}
 	if ShouldTriggerNewData(ctx, currentTask) {
 		runStartAt, runEndAt := currentTask.GetRunTimeRange()
-		err = p.OnCreateTaskRunChange(ctx, taskexe.OnCreateTaskRunChangeReq{
+		err = p.OnTaskRunCreated(ctx, taskexe.OnTaskRunCreatedReq{
 			CurrentTask: currentTask,
-			RunType:     task.TaskRunTypeNewData,
+			RunType:     task_entity.TaskRunTypeNewData,
 			RunStartAt:  runStartAt,
 			RunEndAt:    runEndAt,
 		})
 		if err != nil {
-			logs.CtxError(ctx, "OnCreateTaskChange failed, taskID:%d, err:%v", currentTask.ID, err)
+			logs.CtxError(ctx, "OnTaskCreated failed, taskID:%d, err:%v", currentTask.ID, err)
 			return err
 		}
-		err = p.OnUpdateTaskChange(ctx, currentTask, task.TaskStatusRunning)
+		err = p.OnTaskUpdated(ctx, currentTask, task.TaskStatusRunning)
 		if err != nil {
-			logs.CtxError(ctx, "OnCreateTaskChange failed, taskID:%d, err:%v", currentTask.ID, err)
+			logs.CtxError(ctx, "OnTaskCreated failed, taskID:%d, err:%v", currentTask.ID, err)
 			return err
 		}
 	}
 	return nil
 }
 
-func (p *AutoEvaluteProcessor) OnUpdateTaskChange(ctx context.Context, currentTask *task_entity.ObservabilityTask, taskOp task.TaskStatus) error {
+func (p *AutoEvaluateProcessor) OnTaskUpdated(ctx context.Context, currentTask *task_entity.ObservabilityTask, taskOp task_entity.TaskStatus) error {
 	switch taskOp {
-	case task.TaskStatusSuccess:
-		if currentTask.TaskStatus != task.TaskStatusDisabled {
-			currentTask.TaskStatus = task.TaskStatusSuccess
+	case task_entity.TaskStatusSuccess:
+		if currentTask.TaskStatus != task_entity.TaskStatusDisabled {
+			currentTask.TaskStatus = task_entity.TaskStatusSuccess
 		}
-	case task.TaskStatusRunning:
-		if currentTask.TaskStatus != task.TaskStatusDisabled && currentTask.TaskStatus != task.TaskStatusSuccess {
-			currentTask.TaskStatus = task.TaskStatusRunning
+	case task_entity.TaskStatusRunning:
+		if currentTask.TaskStatus != task_entity.TaskStatusDisabled && currentTask.TaskStatus != task_entity.TaskStatusSuccess {
+			currentTask.TaskStatus = task_entity.TaskStatusRunning
 		}
-	case task.TaskStatusDisabled:
-		if currentTask.TaskStatus != task.TaskStatusDisabled {
-			currentTask.TaskStatus = task.TaskStatusDisabled
+	case task_entity.TaskStatusDisabled:
+		if currentTask.TaskStatus != task_entity.TaskStatusDisabled {
+			currentTask.TaskStatus = task_entity.TaskStatusDisabled
 		}
-	case task.TaskStatusPending:
-		if currentTask.TaskStatus == task.TaskStatusPending || currentTask.TaskStatus == task.TaskStatusUnstarted {
-			currentTask.TaskStatus = task.TaskStatusPending
+	case task_entity.TaskStatusPending:
+		if currentTask.TaskStatus == task_entity.TaskStatusPending || currentTask.TaskStatus == task_entity.TaskStatusUnstarted {
+			currentTask.TaskStatus = task_entity.TaskStatusPending
 		}
 	default:
 		return fmt.Errorf("OnUpdateChangeProcessor, valid taskOp:%s", taskOp)
@@ -230,18 +253,18 @@ func (p *AutoEvaluteProcessor) OnUpdateTaskChange(ctx context.Context, currentTa
 	return nil
 }
 
-func (p *AutoEvaluteProcessor) OnFinishTaskChange(ctx context.Context, param taskexe.OnFinishTaskChangeReq) error {
-	err := p.OnFinishTaskRunChange(ctx, taskexe.OnFinishTaskRunChangeReq{
+func (p *AutoEvaluateProcessor) OnTaskFinished(ctx context.Context, param taskexe.OnTaskFinishedReq) error {
+	err := p.OnTaskRunFinished(ctx, taskexe.OnTaskRunFinishedReq{
 		Task:    param.Task,
 		TaskRun: param.TaskRun,
 	})
 	if err != nil {
-		logs.CtxError(ctx, "OnFinishTaskRunChange failed, taskRun:%+v, err:%v", param.TaskRun, err)
+		logs.CtxError(ctx, "OnTaskRunFinished failed, taskRun:%+v, err:%v", param.TaskRun, err)
 		return err
 	}
 	if param.IsFinish {
-		logs.CtxWarn(ctx, "OnFinishTaskChange, taskID:%d, taskRun:%+v, isFinish:%v", param.Task.ID, param.TaskRun, param.IsFinish)
-		if err := p.OnUpdateTaskChange(ctx, param.Task, task.TaskStatusSuccess); err != nil {
+		logs.CtxWarn(ctx, "OnTaskFinished, taskID:%d, taskRun:%+v, isFinish:%v", param.Task.ID, param.TaskRun, param.IsFinish)
+		if err := p.OnTaskUpdated(ctx, param.Task, task.TaskStatusSuccess); err != nil {
 			logs.CtxError(ctx, "OnUpdateChangeProcessor failed, taskID:%d, err:%v", param.Task.ID, err)
 			return err
 		}
@@ -260,7 +283,7 @@ const (
 	BackFillI18N     = "BackFill"
 )
 
-func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param taskexe.OnCreateTaskRunChangeReq) error {
+func (p *AutoEvaluateProcessor) OnTaskRunCreated(ctx context.Context, param taskexe.OnTaskRunCreatedReq) error {
 	currentTask := param.CurrentTask
 	ctx = session.WithCtxUser(ctx, &session.User{ID: currentTask.CreatedBy})
 	sessionInfo := p.getSession(ctx, currentTask)
@@ -302,11 +325,11 @@ func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param 
 			FromEvalSet:        fromEvalSet,
 		})
 	}
-	category := getCategory(currentTask.TaskType)
+	category := getCategory(task.TaskType(currentTask.TaskType))
 	schema := convertDatasetSchemaDTO2DO(evaluationSetSchema)
 	logs.CtxInfo(ctx, "[auto_task] CreateDataset,category:%s", category)
 	var datasetName, exptName string
-	if param.RunType == task.TaskRunTypeBackFill {
+	if param.RunType == task_entity.TaskRunTypeBackFill {
 		datasetName = fmt.Sprintf("%s_%s_%s_%d.%d.%d.%d", AutoEvaluateCN, BackFillCN, currentTask.Name, time.Now().Year(), time.Now().Month(), time.Now().Day(), time.Now().Unix())
 		exptName = fmt.Sprintf("%s_%s_%s_%d.%d.%d.%d", AutoEvaluateCN, BackFillCN, currentTask.Name, time.Now().Year(), time.Now().Month(), time.Now().Day(), time.Now().Unix())
 	} else {
@@ -327,7 +350,7 @@ func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param 
 		logs.CtxError(ctx, "CreateDataset failed, workspace_id=%d, err=%#v", currentTask.WorkspaceID, err)
 		return err
 	}
-	logs.CtxInfo(ctx, "[auto_task] AutoEvaluteProcessor OnChangeProcessor, datasetID:%d", datasetID)
+	logs.CtxInfo(ctx, "[auto_task] AutoEvaluateProcessor OnChangeProcessor, datasetID:%d", datasetID)
 	// Step 2: create experiment
 	maxAliveTime := param.RunEndAt - param.RunStartAt
 	submitExperimentReq := rpc.SubmitExperimentReq{
@@ -341,15 +364,12 @@ func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param 
 		TargetFieldMapping: &expt.TargetFieldMapping{
 			FromEvalSet: []*expt.FieldMapping{},
 		},
-		CreateEvalTargetParam: &eval_target.CreateEvalTargetParam{
-			SourceTargetID: gptr.Of(cast.ToString(currentTask.ID)),
-			EvalTargetType: gptr.Of(eval_target_d.EvalTargetType_Trace),
-		},
-		ExptType:     gptr.Of(expt.ExptType_Online),
-		MaxAliveTime: gptr.Of(maxAliveTime),
-		SourceType:   gptr.Of(expt.SourceType_AutoTask),
-		SourceID:     gptr.Of(cast.ToString(currentTask.ID)),
-		Session:      sessionInfo,
+		CreateEvalTargetParam: p.evalTargetBuilder.Build(ctx, currentTask),
+		ExptType:              gptr.Of(expt.ExptType_Online),
+		MaxAliveTime:          gptr.Of(maxAliveTime),
+		SourceType:            gptr.Of(expt.SourceType_AutoTask),
+		SourceID:              gptr.Of(cast.ToString(currentTask.ID)),
+		Session:               sessionInfo,
 	}
 	logs.CtxInfo(ctx, "[auto_task] SubmitExperiment:%+v", submitExperimentReq)
 	exptID, exptRunID, err := p.evaluationSvc.SubmitExperiment(ctx, &submitExperimentReq)
@@ -357,7 +377,7 @@ func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param 
 		logs.CtxError(ctx, "SubmitExperiment failed, workspace_id=%d, err=%#v", currentTask.WorkspaceID, err)
 		return err
 	}
-	logs.CtxInfo(ctx, "[auto_task] AutoEvaluteProcessor OnChangeProcessor, exptID:%d, exptRunID:%d", exptID, exptRunID)
+	logs.CtxInfo(ctx, "[auto_task] AutoEvaluateProcessor OnChangeProcessor, exptID:%d, exptRunID:%d", exptID, exptRunID)
 
 	evaluationSetConfig, err := p.datasetServiceAdaptor.GetDatasetProvider(category).GetDataset(ctx, currentTask.WorkspaceID, datasetID, category)
 	if err != nil {
@@ -383,7 +403,7 @@ func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param 
 		TaskID:        currentTask.ID,
 		WorkspaceID:   currentTask.WorkspaceID,
 		TaskType:      param.RunType,
-		RunStatus:     task.RunStatusRunning,
+		RunStatus:     task_entity.TaskRunStatusRunning,
 		RunStartAt:    time.UnixMilli(param.RunStartAt),
 		RunEndAt:      time.UnixMilli(param.RunEndAt),
 		CreatedAt:     time.Now(),
@@ -398,7 +418,7 @@ func (p *AutoEvaluteProcessor) OnCreateTaskRunChange(ctx context.Context, param 
 	return nil
 }
 
-func (p *AutoEvaluteProcessor) OnFinishTaskRunChange(ctx context.Context, param taskexe.OnFinishTaskRunChangeReq) error {
+func (p *AutoEvaluateProcessor) OnTaskRunFinished(ctx context.Context, param taskexe.OnTaskRunFinishedReq) error {
 	if param.TaskRun == nil || param.TaskRun.TaskRunConfig == nil || param.TaskRun.TaskRunConfig.AutoEvaluateRunConfig == nil {
 		return nil
 	}
@@ -423,14 +443,30 @@ func (p *AutoEvaluteProcessor) OnFinishTaskRunChange(ctx context.Context, param 
 	return nil
 }
 
-func (p *AutoEvaluteProcessor) getSession(ctx context.Context, task *task_entity.ObservabilityTask) *common.Session {
+func (p *AutoEvaluateProcessor) onTaskRunTerminated(ctx context.Context, taskRun *task_entity.TaskRun) error {
+	if taskRun == nil {
+		return nil
+	}
+
+	// Set task run status to completed
+	taskRun.RunStatus = task.RunStatusDone
+	// Update task run
+	err := p.taskRepo.UpdateTaskRun(ctx, taskRun)
+	if err != nil {
+		logs.CtxError(ctx, "[auto_task] OnFinishTaskRunProcessor, UpdateTaskRun err, taskRunID:%d, err:%v", taskRun.ID, err)
+		return err
+	}
+	return nil
+}
+
+func (p *AutoEvaluateProcessor) getSession(ctx context.Context, task *task_entity.ObservabilityTask) *common.Session {
 	userIDStr := session.UserIDInCtxOrEmpty(ctx)
 	if userIDStr == "" {
 		userIDStr = task.CreatedBy
 	}
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
-		logs.CtxError(ctx, "[task-debug] AutoEvaluteProcessor OnChangeProcessor, ParseInt err:%v", err)
+		logs.CtxError(ctx, "[task-debug] AutoEvaluateProcessor OnChangeProcessor, ParseInt err:%v", err)
 	}
 	return &common.Session{
 		UserID: gptr.Of(userID),

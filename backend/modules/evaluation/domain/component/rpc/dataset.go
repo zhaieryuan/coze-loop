@@ -12,6 +12,11 @@ import (
 //go:generate mockgen -destination=mocks/data_provider.go -package=mocks . IDatasetRPCAdapter
 type IDatasetRPCAdapter interface {
 	CreateDataset(ctx context.Context, param *CreateDatasetParam) (id int64, err error)
+	CreateDatasetWithImport(ctx context.Context, param *CreateDatasetWithImportParam) (id, jobID int64, err error)
+	ImportDataset(ctx context.Context, param *ImportDatasetParam) (jobID int64, err error)
+	GetDatasetIOJob(ctx context.Context, spaceID, jobID int64) (job *entity.DatasetIOJob, err error)
+	ParseImportSourceFile(ctx context.Context, param *entity.ParseImportSourceFileParam) (*entity.ParseImportSourceFileResult, error)
+	ValidateMultiPartData(ctx context.Context, spaceID int64, previewData []string, storeOption *entity.MultiModalStoreOption) ([]*entity.UploadAttachmentDetail, error)
 	UpdateDataset(ctx context.Context, spaceID, evaluationSetID int64, name, desc *string) (err error)
 	DeleteDataset(ctx context.Context, spaceID, evaluationSetID int64) (err error)
 	GetDataset(ctx context.Context, spaceID *int64, evaluationSetID int64, deletedAt *bool) (set *entity.EvaluationSet, err error)
@@ -27,14 +32,28 @@ type IDatasetRPCAdapter interface {
 
 	BatchCreateDatasetItems(ctx context.Context, param *BatchCreateDatasetItemsParam) (idMap map[int64]int64, errorGroup []*entity.ItemErrorGroup, itemOutputs []*entity.DatasetItemOutput, err error)
 	BatchUpdateDatasetItems(ctx context.Context, param *BatchUpdateDatasetItemsParam) (errorGroup []*entity.ItemErrorGroup, itemOutputs []*entity.DatasetItemOutput, err error)
-	UpdateDatasetItem(ctx context.Context, spaceID, evaluationSetID, itemID int64, turns []*entity.Turn) (err error)
+	UpdateDatasetItem(ctx context.Context, spaceID, evaluationSetID, itemID int64, turns []*entity.Turn, fieldWriteOptions []*entity.FieldWriteOption) (err error)
 	BatchDeleteDatasetItems(ctx context.Context, spaceID, evaluationSetID int64, itemIDs []int64) (err error)
-	ListDatasetItems(ctx context.Context, param *ListDatasetItemsParam) (items []*entity.EvaluationSetItem, total *int64, nextPageToken *string, err error)
-	ListDatasetItemsByVersion(ctx context.Context, param *ListDatasetItemsParam) (items []*entity.EvaluationSetItem, total *int64, nextPageToken *string, err error)
+	ListDatasetItems(ctx context.Context, param *ListDatasetItemsParam) (items []*entity.EvaluationSetItem, total, filterTotal *int64, nextPageToken *string, err error)
+	ListDatasetItemsByVersion(ctx context.Context, param *ListDatasetItemsParam) (items []*entity.EvaluationSetItem, total, filterTotal *int64, nextPageToken *string, err error)
 	BatchGetDatasetItems(ctx context.Context, param *BatchGetDatasetItemsParam) (items []*entity.EvaluationSetItem, err error)
 	BatchGetDatasetItemsByVersion(ctx context.Context, param *BatchGetDatasetItemsParam) (items []*entity.EvaluationSetItem, err error)
 	ClearEvaluationSetDraftItem(ctx context.Context, spaceID, evaluationSetID int64) (err error)
 	QueryItemSnapshotMappings(ctx context.Context, spaceID, datasetID int64, versionID *int64) (fieldMappings []*entity.ItemSnapshotFieldMapping, syncCkDate string, err error)
+	GetDatasetItemField(ctx context.Context, param *GetDatasetItemFieldParam) (fieldData *entity.FieldData, err error)
+}
+
+type GetDatasetItemFieldParam struct {
+	SpaceID         int64
+	EvaluationSetID int64
+	// item 的主键ID，即 item.ID 这一字段
+	ItemPK int64
+	// 列名
+	FieldName string
+	// 列的唯一键，用于精确查找
+	FieldKey *string
+	// 当 item 为多轮时，必须提供
+	TurnID *int64
 }
 
 type CreateDatasetParam struct {
@@ -44,6 +63,28 @@ type CreateDatasetParam struct {
 	EvaluationSetItems *entity.EvaluationSetSchema
 	BizCategory        *entity.BizCategory
 	Session            *entity.Session
+}
+
+type CreateDatasetWithImportParam struct {
+	SpaceID            int64
+	Name               string
+	Desc               *string
+	EvaluationSetItems *entity.EvaluationSetSchema
+	BizCategory        *entity.BizCategory
+
+	SourceType    *entity.SetSourceType
+	Source        *entity.DatasetIOEndpoint
+	FieldMappings []*entity.FieldMapping
+	Session       *entity.Session
+	Option        *entity.DatasetIOJobOption
+}
+
+type ImportDatasetParam struct {
+	WorkspaceID   int64
+	DatasetID     int64
+	File          *entity.DatasetIOFile
+	FieldMappings []*entity.FieldMapping
+	Option        *entity.DatasetIOJobOption
 }
 
 type ListDatasetsParam struct {
@@ -66,6 +107,7 @@ type ListDatasetItemsParam struct {
 	PageToken       *string
 	OrderBys        []*entity.OrderBy
 	ItemIDsNotIn    []int64
+	Filter          *entity.Filter
 }
 
 type BatchGetDatasetItemsParam struct {
@@ -83,6 +125,8 @@ type BatchCreateDatasetItemsParam struct {
 	SkipInvalidItems *bool
 	// 批量写入 items 如果超出数据集容量限制，默认不会写入任何数据；设置 partialAdd=true 会写入不超出容量限制的前 N 条
 	AllowPartialAdd *bool
+
+	FieldWriteOptions []*entity.FieldWriteOption
 }
 
 type BatchUpdateDatasetItemsParam struct {

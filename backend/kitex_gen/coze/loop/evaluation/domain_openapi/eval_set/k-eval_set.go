@@ -128,6 +128,20 @@ func (p *FieldSchema) FastRead(buf []byte) (int, error) {
 					goto SkipFieldError
 				}
 			}
+		case 7:
+			if fieldTypeId == thrift.STRING {
+				l, err = p.FastReadField7(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
 		case 10:
 			if fieldTypeId == thrift.STRING {
 				l, err = p.FastReadField10(buf[offset:])
@@ -244,6 +258,20 @@ func (p *FieldSchema) FastReadField6(buf []byte) (int, error) {
 	return offset, nil
 }
 
+func (p *FieldSchema) FastReadField7(buf []byte) (int, error) {
+	offset := 0
+
+	var _field *SchemaKey
+	if v, l, err := thrift.Binary.ReadString(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+		_field = &v
+	}
+	p.SchemaKey = _field
+	return offset, nil
+}
+
 func (p *FieldSchema) FastReadField10(buf []byte) (int, error) {
 	offset := 0
 
@@ -271,6 +299,7 @@ func (p *FieldSchema) FastWriteNocopy(buf []byte, w thrift.NocopyWriter) int {
 		offset += p.fastWriteField3(buf[offset:], w)
 		offset += p.fastWriteField4(buf[offset:], w)
 		offset += p.fastWriteField6(buf[offset:], w)
+		offset += p.fastWriteField7(buf[offset:], w)
 		offset += p.fastWriteField10(buf[offset:], w)
 	}
 	offset += thrift.Binary.WriteFieldStop(buf[offset:])
@@ -286,6 +315,7 @@ func (p *FieldSchema) BLength() int {
 		l += p.field4Length()
 		l += p.field5Length()
 		l += p.field6Length()
+		l += p.field7Length()
 		l += p.field10Length()
 	}
 	l += thrift.Binary.FieldStopLength()
@@ -342,6 +372,15 @@ func (p *FieldSchema) fastWriteField6(buf []byte, w thrift.NocopyWriter) int {
 	if p.IsSetTextSchema() {
 		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRING, 6)
 		offset += thrift.Binary.WriteStringNocopy(buf[offset:], w, *p.TextSchema)
+	}
+	return offset
+}
+
+func (p *FieldSchema) fastWriteField7(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p.IsSetSchemaKey() {
+		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRING, 7)
+		offset += thrift.Binary.WriteStringNocopy(buf[offset:], w, *p.SchemaKey)
 	}
 	return offset
 }
@@ -409,6 +448,15 @@ func (p *FieldSchema) field6Length() int {
 	return l
 }
 
+func (p *FieldSchema) field7Length() int {
+	l := 0
+	if p.IsSetSchemaKey() {
+		l += thrift.Binary.FieldBeginLength()
+		l += thrift.Binary.StringLengthNocopy(*p.SchemaKey)
+	}
+	return l
+}
+
 func (p *FieldSchema) field10Length() int {
 	l := 0
 	if p.IsSetKey() {
@@ -461,6 +509,11 @@ func (p *FieldSchema) DeepCopy(s interface{}) error {
 			tmp = kutils.StringDeepCopy(*src.TextSchema)
 		}
 		p.TextSchema = &tmp
+	}
+
+	if src.SchemaKey != nil {
+		tmp := *src.SchemaKey
+		p.SchemaKey = &tmp
 	}
 
 	if src.Key != nil {
@@ -3356,6 +3409,407 @@ func (p *DatasetItemOutput) DeepCopy(s interface{}) error {
 		tmp := *src.IsNewItem
 		p.IsNewItem = &tmp
 	}
+
+	return nil
+}
+
+func (p *MultiModalStoreOption) FastRead(buf []byte) (int, error) {
+
+	var err error
+	var offset int
+	var l int
+	var fieldTypeId thrift.TType
+	var fieldId int16
+	for {
+		fieldTypeId, fieldId, l, err = thrift.Binary.ReadFieldBegin(buf[offset:])
+		offset += l
+		if err != nil {
+			goto ReadFieldBeginError
+		}
+		if fieldTypeId == thrift.STOP {
+			break
+		}
+		switch fieldId {
+		case 1:
+			if fieldTypeId == thrift.STRING {
+				l, err = p.FastReadField1(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		default:
+			l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+			offset += l
+			if err != nil {
+				goto SkipFieldError
+			}
+		}
+	}
+
+	return offset, nil
+ReadFieldBeginError:
+	return offset, thrift.PrependError(fmt.Sprintf("%T read field %d begin error: ", p, fieldId), err)
+ReadFieldError:
+	return offset, thrift.PrependError(fmt.Sprintf("%T read field %d '%s' error: ", p, fieldId, fieldIDToName_MultiModalStoreOption[fieldId]), err)
+SkipFieldError:
+	return offset, thrift.PrependError(fmt.Sprintf("%T field %d skip type %d error: ", p, fieldId, fieldTypeId), err)
+}
+
+func (p *MultiModalStoreOption) FastReadField1(buf []byte) (int, error) {
+	offset := 0
+
+	var _field *MultiModalStoreStrategy
+	if v, l, err := thrift.Binary.ReadString(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+		_field = &v
+	}
+	p.MultiModalStoreStrategy = _field
+	return offset, nil
+}
+
+func (p *MultiModalStoreOption) FastWrite(buf []byte) int {
+	return p.FastWriteNocopy(buf, nil)
+}
+
+func (p *MultiModalStoreOption) FastWriteNocopy(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p != nil {
+		offset += p.fastWriteField1(buf[offset:], w)
+	}
+	offset += thrift.Binary.WriteFieldStop(buf[offset:])
+	return offset
+}
+
+func (p *MultiModalStoreOption) BLength() int {
+	l := 0
+	if p != nil {
+		l += p.field1Length()
+	}
+	l += thrift.Binary.FieldStopLength()
+	return l
+}
+
+func (p *MultiModalStoreOption) fastWriteField1(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p.IsSetMultiModalStoreStrategy() {
+		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRING, 1)
+		offset += thrift.Binary.WriteStringNocopy(buf[offset:], w, *p.MultiModalStoreStrategy)
+	}
+	return offset
+}
+
+func (p *MultiModalStoreOption) field1Length() int {
+	l := 0
+	if p.IsSetMultiModalStoreStrategy() {
+		l += thrift.Binary.FieldBeginLength()
+		l += thrift.Binary.StringLengthNocopy(*p.MultiModalStoreStrategy)
+	}
+	return l
+}
+
+func (p *MultiModalStoreOption) DeepCopy(s interface{}) error {
+	src, ok := s.(*MultiModalStoreOption)
+	if !ok {
+		return fmt.Errorf("%T's type not matched %T", s, p)
+	}
+
+	if src.MultiModalStoreStrategy != nil {
+		tmp := *src.MultiModalStoreStrategy
+		p.MultiModalStoreStrategy = &tmp
+	}
+
+	return nil
+}
+
+func (p *FieldWriteOption) FastRead(buf []byte) (int, error) {
+
+	var err error
+	var offset int
+	var l int
+	var fieldTypeId thrift.TType
+	var fieldId int16
+	for {
+		fieldTypeId, fieldId, l, err = thrift.Binary.ReadFieldBegin(buf[offset:])
+		offset += l
+		if err != nil {
+			goto ReadFieldBeginError
+		}
+		if fieldTypeId == thrift.STOP {
+			break
+		}
+		switch fieldId {
+		case 1:
+			if fieldTypeId == thrift.STRING {
+				l, err = p.FastReadField1(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		case 2:
+			if fieldTypeId == thrift.STRING {
+				l, err = p.FastReadField2(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		case 3:
+			if fieldTypeId == thrift.STRING {
+				l, err = p.FastReadField3(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		case 4:
+			if fieldTypeId == thrift.STRUCT {
+				l, err = p.FastReadField4(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		default:
+			l, err = thrift.Binary.Skip(buf[offset:], fieldTypeId)
+			offset += l
+			if err != nil {
+				goto SkipFieldError
+			}
+		}
+	}
+
+	return offset, nil
+ReadFieldBeginError:
+	return offset, thrift.PrependError(fmt.Sprintf("%T read field %d begin error: ", p, fieldId), err)
+ReadFieldError:
+	return offset, thrift.PrependError(fmt.Sprintf("%T read field %d '%s' error: ", p, fieldId, fieldIDToName_FieldWriteOption[fieldId]), err)
+SkipFieldError:
+	return offset, thrift.PrependError(fmt.Sprintf("%T field %d skip type %d error: ", p, fieldId, fieldTypeId), err)
+}
+
+func (p *FieldWriteOption) FastReadField1(buf []byte) (int, error) {
+	offset := 0
+
+	var _field *string
+	if v, l, err := thrift.Binary.ReadString(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+		_field = &v
+	}
+	p.FieldName = _field
+	return offset, nil
+}
+
+func (p *FieldWriteOption) FastReadField2(buf []byte) (int, error) {
+	offset := 0
+
+	var _field *string
+	if v, l, err := thrift.Binary.ReadString(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+		_field = &v
+	}
+	p.FieldKey = _field
+	return offset, nil
+}
+
+func (p *FieldWriteOption) FastReadField3(buf []byte) (int, error) {
+	offset := 0
+
+	var _field *common.ContentType
+	if v, l, err := thrift.Binary.ReadString(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+		_field = &v
+	}
+	p.ModalityType = _field
+	return offset, nil
+}
+
+func (p *FieldWriteOption) FastReadField4(buf []byte) (int, error) {
+	offset := 0
+	_field := NewMultiModalStoreOption()
+	if l, err := _field.FastRead(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+	}
+	p.MultiModalStoreOpt = _field
+	return offset, nil
+}
+
+func (p *FieldWriteOption) FastWrite(buf []byte) int {
+	return p.FastWriteNocopy(buf, nil)
+}
+
+func (p *FieldWriteOption) FastWriteNocopy(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p != nil {
+		offset += p.fastWriteField1(buf[offset:], w)
+		offset += p.fastWriteField2(buf[offset:], w)
+		offset += p.fastWriteField3(buf[offset:], w)
+		offset += p.fastWriteField4(buf[offset:], w)
+	}
+	offset += thrift.Binary.WriteFieldStop(buf[offset:])
+	return offset
+}
+
+func (p *FieldWriteOption) BLength() int {
+	l := 0
+	if p != nil {
+		l += p.field1Length()
+		l += p.field2Length()
+		l += p.field3Length()
+		l += p.field4Length()
+	}
+	l += thrift.Binary.FieldStopLength()
+	return l
+}
+
+func (p *FieldWriteOption) fastWriteField1(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p.IsSetFieldName() {
+		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRING, 1)
+		offset += thrift.Binary.WriteStringNocopy(buf[offset:], w, *p.FieldName)
+	}
+	return offset
+}
+
+func (p *FieldWriteOption) fastWriteField2(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p.IsSetFieldKey() {
+		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRING, 2)
+		offset += thrift.Binary.WriteStringNocopy(buf[offset:], w, *p.FieldKey)
+	}
+	return offset
+}
+
+func (p *FieldWriteOption) fastWriteField3(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p.IsSetModalityType() {
+		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRING, 3)
+		offset += thrift.Binary.WriteStringNocopy(buf[offset:], w, *p.ModalityType)
+	}
+	return offset
+}
+
+func (p *FieldWriteOption) fastWriteField4(buf []byte, w thrift.NocopyWriter) int {
+	offset := 0
+	if p.IsSetMultiModalStoreOpt() {
+		offset += thrift.Binary.WriteFieldBegin(buf[offset:], thrift.STRUCT, 4)
+		offset += p.MultiModalStoreOpt.FastWriteNocopy(buf[offset:], w)
+	}
+	return offset
+}
+
+func (p *FieldWriteOption) field1Length() int {
+	l := 0
+	if p.IsSetFieldName() {
+		l += thrift.Binary.FieldBeginLength()
+		l += thrift.Binary.StringLengthNocopy(*p.FieldName)
+	}
+	return l
+}
+
+func (p *FieldWriteOption) field2Length() int {
+	l := 0
+	if p.IsSetFieldKey() {
+		l += thrift.Binary.FieldBeginLength()
+		l += thrift.Binary.StringLengthNocopy(*p.FieldKey)
+	}
+	return l
+}
+
+func (p *FieldWriteOption) field3Length() int {
+	l := 0
+	if p.IsSetModalityType() {
+		l += thrift.Binary.FieldBeginLength()
+		l += thrift.Binary.StringLengthNocopy(*p.ModalityType)
+	}
+	return l
+}
+
+func (p *FieldWriteOption) field4Length() int {
+	l := 0
+	if p.IsSetMultiModalStoreOpt() {
+		l += thrift.Binary.FieldBeginLength()
+		l += p.MultiModalStoreOpt.BLength()
+	}
+	return l
+}
+
+func (p *FieldWriteOption) DeepCopy(s interface{}) error {
+	src, ok := s.(*FieldWriteOption)
+	if !ok {
+		return fmt.Errorf("%T's type not matched %T", s, p)
+	}
+
+	if src.FieldName != nil {
+		var tmp string
+		if *src.FieldName != "" {
+			tmp = kutils.StringDeepCopy(*src.FieldName)
+		}
+		p.FieldName = &tmp
+	}
+
+	if src.FieldKey != nil {
+		var tmp string
+		if *src.FieldKey != "" {
+			tmp = kutils.StringDeepCopy(*src.FieldKey)
+		}
+		p.FieldKey = &tmp
+	}
+
+	if src.ModalityType != nil {
+		tmp := *src.ModalityType
+		p.ModalityType = &tmp
+	}
+
+	var _multiModalStoreOpt *MultiModalStoreOption
+	if src.MultiModalStoreOpt != nil {
+		_multiModalStoreOpt = &MultiModalStoreOption{}
+		if err := _multiModalStoreOpt.DeepCopy(src.MultiModalStoreOpt); err != nil {
+			return err
+		}
+	}
+	p.MultiModalStoreOpt = _multiModalStoreOpt
 
 	return nil
 }

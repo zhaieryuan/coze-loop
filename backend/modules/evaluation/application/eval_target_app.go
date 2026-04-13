@@ -15,6 +15,7 @@ import (
 	"github.com/coze-dev/coze-loop/backend/infra/middleware/session"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/base"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation"
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain/common"
 	eval_target_dto "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain/eval_target"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/eval_target"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/spi"
@@ -408,6 +409,56 @@ func (e EvalTargetApplicationImpl) BatchGetEvalTargetRecords(ctx context.Context
 	return resp, nil
 }
 
+func (e EvalTargetApplicationImpl) GetEvalTargetOutputFieldContent(ctx context.Context, request *eval_target.GetEvalTargetOutputFieldContentRequest) (r *eval_target.GetEvalTargetOutputFieldContentResponse, err error) {
+	if request == nil {
+		return nil, errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("req is nil"))
+	}
+	if request.WorkspaceID == 0 || request.EvalTargetRecordID == 0 || len(request.FieldKeys) == 0 {
+		return nil, errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("workspace_id, eval_target_record_id and field_keys are required"))
+	}
+	resp := &eval_target.GetEvalTargetOutputFieldContentResponse{}
+	// 通过 eval_target_record_id 查询 target_record
+	record, err := e.evalTargetService.GetRecordByID(ctx, request.WorkspaceID, request.EvalTargetRecordID)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		return nil, errorx.NewByCode(errno.ResourceNotFoundCode, errorx.WithExtraMsg("eval target record not found"))
+	}
+	// 鉴权
+	err = e.auth.Authorization(ctx, &rpc.AuthorizationParam{
+		ObjectID:      strconv.FormatInt(record.TargetID, 10),
+		SpaceID:       request.WorkspaceID,
+		ActionObjects: []*rpc.ActionObject{{Action: gptr.Of(consts.Read), EntityType: gptr.Of(rpc.AuthEntityType_EvaluationTarget)}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 加载大对象完整内容
+	if err := e.evalTargetService.LoadRecordOutputFields(ctx, record, request.FieldKeys); err != nil {
+		return nil, err
+	}
+	// 提取请求的字段内容
+	fieldContents := make(map[string]*entity.Content)
+	if record.EvalTargetOutputData != nil && record.EvalTargetOutputData.OutputFields != nil {
+		keySet := make(map[string]struct{}, len(request.FieldKeys))
+		for _, k := range request.FieldKeys {
+			keySet[k] = struct{}{}
+		}
+		for k, c := range record.EvalTargetOutputData.OutputFields {
+			if _, ok := keySet[k]; ok {
+				fieldContents[k] = c
+			}
+		}
+	}
+	if len(fieldContents) == 0 {
+		resp.FieldContents = map[string]*common.Content{}
+		return resp, nil
+	}
+	resp.FieldContents = target.ContentDOToDTOs(fieldContents)
+	return resp, nil
+}
+
 func (e EvalTargetApplicationImpl) BatchGetSourceEvalTargets(ctx context.Context, request *eval_target.BatchGetSourceEvalTargetsRequest) (r *eval_target.BatchGetSourceEvalTargetsResponse, err error) {
 	if request == nil {
 		return nil, errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("req is nil"))
@@ -631,7 +682,7 @@ func (e EvalTargetApplicationImpl) AsyncDebugEvalTarget(ctx context.Context, req
 
 		recordID := record.ID
 		if err := e.evalAsyncRepo.SetEvalAsyncCtx(ctx, strconv.FormatInt(recordID, 10), &entity.EvalAsyncCtx{
-			TurnID:      recordID,
+			RecordID:    recordID,
 			AsyncUnixMS: startTime.UnixMilli(),
 			Session:     &entity.Session{UserID: userID},
 			Callee:      callee,

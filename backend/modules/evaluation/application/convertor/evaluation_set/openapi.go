@@ -5,6 +5,9 @@ package evaluation_set
 
 import (
 	"github.com/bytedance/gg/gptr"
+
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/data/domain/dataset"
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/data/domain/dataset_job"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain_openapi/common"
 	openapi_eval_set "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain_openapi/eval_set"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/entity"
@@ -23,8 +26,12 @@ func convertOpenAPIContentTypeToDO(contentType *common.ContentType) entity.Conte
 		return entity.ContentTypeImage
 	case common.ContentTypeAudio:
 		return entity.ContentTypeAudio
+	case common.ContentTypeVideo:
+		return entity.ContentTypeVideo
 	case common.ContentTypeMultiPart:
 		return entity.ContentTypeMultipart
+	case common.ContentTypeMultiPartVariable:
+		return entity.ContentTypeMultipartVariable
 	default:
 		return entity.ContentTypeText // 默认使用Text类型
 	}
@@ -46,14 +53,45 @@ func convertDOContentTypeToOpenAPI(contentType entity.ContentType) *common.Conte
 	case entity.ContentTypeAudio:
 		ct := common.ContentTypeAudio
 		return &ct
-	case entity.ContentTypeMultipart, entity.ContentTypeMultipartVariable:
+	case entity.ContentTypeVideo:
+		ct := common.ContentTypeVideo
+		return &ct
+	case entity.ContentTypeMultipart:
 		ct := common.ContentTypeMultiPart
+		return &ct
+	case entity.ContentTypeMultipartVariable:
+		ct := common.ContentTypeMultiPartVariable
 		return &ct
 	default:
 		// 默认使用text类型
 		ct := common.ContentTypeText
 		return &ct
 	}
+}
+
+func convertDOSchemaKeyToOpenAPI(key *entity.SchemaKey) *openapi_eval_set.SchemaKey {
+	if key == nil {
+		return nil
+	}
+
+	switch gptr.Indirect(key) {
+	case entity.SchemaKey_Integer:
+		ct := openapi_eval_set.SchemaKeyInteger
+		return &ct
+	case entity.SchemaKey_Float:
+		ct := openapi_eval_set.SchemaKeyFloat
+		return &ct
+	case entity.SchemaKey_String:
+		ct := openapi_eval_set.SchemaKeyString
+		return &ct
+	case entity.SchemaKey_Bool:
+		ct := openapi_eval_set.SchemaKeyBool
+		return &ct
+	case entity.SchemaKey_Trajectory:
+		ct := openapi_eval_set.SchemaKeyTrajectory
+		return &ct
+	}
+	return nil
 }
 
 // convertOpenAPIDisplayFormatToDO 将OpenAPI的DefaultDisplayFormat转换为Domain Entity的DefaultDisplayFormat
@@ -75,6 +113,27 @@ func convertOpenAPIDisplayFormatToDO(format *openapi_eval_set.FieldDisplayFormat
 		return entity.FieldDisplayFormat_Code
 	default:
 		return entity.FieldDisplayFormat_PlainText
+	}
+}
+
+func convertOpenAPISchemaKeyToDO(format *openapi_eval_set.SchemaKey) *entity.SchemaKey {
+	if format == nil {
+		return nil // 默认值
+	}
+
+	switch *format {
+	case openapi_eval_set.SchemaKeyInteger:
+		return gptr.Of(entity.SchemaKey_Integer)
+	case openapi_eval_set.SchemaKeyFloat:
+		return gptr.Of(entity.SchemaKey_Float)
+	case openapi_eval_set.SchemaKeyBool:
+		return gptr.Of(entity.SchemaKey_Bool)
+	case openapi_eval_set.SchemaKeyString:
+		return gptr.Of(entity.SchemaKey_String)
+	case openapi_eval_set.SchemaKeyTrajectory:
+		return gptr.Of(entity.SchemaKey_Trajectory)
+	default:
+		return gptr.Of(entity.SchemaKey_String)
 	}
 }
 
@@ -162,6 +221,7 @@ func OpenAPIFieldSchemaDTO2DO(dto *openapi_eval_set.FieldSchema) *entity.FieldSc
 		ContentType:          contentType,
 		DefaultDisplayFormat: displayFormat,
 		IsRequired:           gptr.Indirect(dto.IsRequired),
+		SchemaKey:            convertOpenAPISchemaKeyToDO(dto.SchemaKey),
 		TextSchema:           textSchema,
 		Key:                  gptr.Indirect(dto.Key),
 	}
@@ -280,6 +340,7 @@ func OpenAPIFieldSchemaDO2DTO(do *entity.FieldSchema) *openapi_eval_set.FieldSch
 		ContentType:          contentType,
 		DefaultDisplayFormat: displayFormat,
 		IsRequired:           gptr.Of(do.IsRequired),
+		SchemaKey:            convertDOSchemaKeyToOpenAPI(do.SchemaKey),
 		TextSchema:           gptr.Of(do.TextSchema),
 		Key:                  gptr.Of(do.Key),
 	}
@@ -322,46 +383,48 @@ func OpenAPIUserInfoDO2DTO(do *entity.UserInfo) *common.UserInfo {
 }
 
 // OpenAPI EvaluationSetItem 转换
-func OpenAPIItemDTO2DOs(dtos []*openapi_eval_set.EvaluationSetItem) []*entity.EvaluationSetItem {
+func OpenAPIItemDTO2DOs(evalSetID int64, dtos []*openapi_eval_set.EvaluationSetItem) []*entity.EvaluationSetItem {
 	if dtos == nil {
 		return nil
 	}
 	result := make([]*entity.EvaluationSetItem, 0)
 	for _, dto := range dtos {
-		result = append(result, OpenAPIItemDTO2DO(dto))
+		result = append(result, OpenAPIItemDTO2DO(evalSetID, dto))
 	}
 	return result
 }
 
-func OpenAPIItemDTO2DO(dto *openapi_eval_set.EvaluationSetItem) *entity.EvaluationSetItem {
+func OpenAPIItemDTO2DO(evalSetID int64, dto *openapi_eval_set.EvaluationSetItem) *entity.EvaluationSetItem {
 	if dto == nil {
 		return nil
 	}
 	return &entity.EvaluationSetItem{
 		ItemID:  gptr.Indirect(dto.ID),
 		ItemKey: gptr.Indirect(dto.ItemKey),
-		Turns:   OpenAPITurnDTO2DOs(dto.Turns),
+		Turns:   OpenAPITurnDTO2DOs(evalSetID, dto.GetID(), dto.Turns),
 	}
 }
 
-func OpenAPITurnDTO2DOs(dtos []*openapi_eval_set.Turn) []*entity.Turn {
+func OpenAPITurnDTO2DOs(evalSetID, itemID int64, dtos []*openapi_eval_set.Turn) []*entity.Turn {
 	if dtos == nil {
 		return nil
 	}
 	result := make([]*entity.Turn, 0)
 	for _, dto := range dtos {
-		result = append(result, OpenAPITurnDTO2DO(dto))
+		result = append(result, OpenAPITurnDTO2DO(evalSetID, itemID, dto))
 	}
 	return result
 }
 
-func OpenAPITurnDTO2DO(dto *openapi_eval_set.Turn) *entity.Turn {
+func OpenAPITurnDTO2DO(evalSetID, itemID int64, dto *openapi_eval_set.Turn) *entity.Turn {
 	if dto == nil {
 		return nil
 	}
 	return &entity.Turn{
 		ID:            gptr.Indirect(dto.ID),
 		FieldDataList: OpenAPIFieldDataDTO2DOs(dto.FieldDatas),
+		ItemID:        itemID,
+		EvalSetID:     evalSetID,
 	}
 }
 
@@ -402,6 +465,8 @@ func OpenAPIContentDTO2DO(content *common.Content) *entity.Content {
 		ContentType: gptr.Of(convertOpenAPIContentTypeToDO(content.ContentType)),
 		Text:        content.Text,
 		Image:       ConvertImageDTO2DO(content.Image),
+		Audio:       ConvertAudioDTO2DO(content.Audio),
+		Video:       ConvertVideoDTO2DO(content.Video),
 		MultiPart:   multiPart,
 	}
 }
@@ -414,6 +479,29 @@ func ConvertImageDTO2DO(img *common.Image) *entity.Image {
 		Name:     img.Name,
 		URL:      img.URL,
 		ThumbURL: img.ThumbURL,
+	}
+}
+
+func ConvertAudioDTO2DO(audio *common.Audio) *entity.Audio {
+	if audio == nil {
+		return nil
+	}
+	return &entity.Audio{
+		URL:  audio.URL,
+		Name: audio.Name,
+		URI:  audio.URI,
+	}
+}
+
+func ConvertVideoDTO2DO(video *common.Video) *entity.Video {
+	if video == nil {
+		return nil
+	}
+	return &entity.Video{
+		Name:     video.Name,
+		URL:      video.URL,
+		ThumbURL: video.ThumbURL,
+		URI:      video.URI,
 	}
 }
 
@@ -494,10 +582,24 @@ func OpenAPIContentDO2DTO(content *entity.Content) *common.Content {
 		}
 	}
 	return &common.Content{
-		ContentType: convertDOContentTypeToOpenAPI(gptr.Indirect(content.ContentType)),
-		Text:        content.Text,
-		Image:       ConvertImageDO2DTO(content.Image),
-		MultiPart:   multiPart,
+		ContentType:      convertDOContentTypeToOpenAPI(gptr.Indirect(content.ContentType)),
+		Text:             content.Text,
+		Image:            ConvertImageDO2DTO(content.Image),
+		Audio:            ConvertAudioDO2DTO(content.Audio),
+		Video:            ConvertVideoDO2DTO(content.Video),
+		MultiPart:        multiPart,
+		ContentOmitted:   content.ContentOmitted,
+		FullContent:      ConvertObjectStorageDO2DTO(content.FullContent),
+		FullContentBytes: content.FullContentBytes,
+	}
+}
+
+func ConvertObjectStorageDO2DTO(os *entity.ObjectStorage) *common.ObjectStorage {
+	if os == nil {
+		return nil
+	}
+	return &common.ObjectStorage{
+		URL: os.URL,
 	}
 }
 
@@ -519,6 +621,20 @@ func ConvertAudioDO2DTO(audio *entity.Audio) *common.Audio {
 	return &common.Audio{
 		Format: audio.Format,
 		URL:    audio.URL,
+		Name:   audio.Name,
+		URI:    audio.URI,
+	}
+}
+
+func ConvertVideoDO2DTO(video *entity.Video) *common.Video {
+	if video == nil {
+		return nil
+	}
+	return &common.Video{
+		Name:     video.Name,
+		URL:      video.URL,
+		ThumbURL: video.ThumbURL,
+		URI:      video.URI,
 	}
 }
 
@@ -588,5 +704,219 @@ func OpenAPIDatasetItemOutputDO2DTO(do *entity.DatasetItemOutput) *openapi_eval_
 		ItemKey:   do.ItemKey,
 		ItemID:    do.ItemID,
 		IsNewItem: do.IsNewItem,
+	}
+}
+
+func OpenAPIDatasetIOJobDO2DTO(job *entity.DatasetIOJob) *dataset_job.DatasetIOJob {
+	if job == nil {
+		return nil
+	}
+	return &dataset_job.DatasetIOJob{
+		ID:            job.ID,
+		AppID:         job.AppID,
+		SpaceID:       job.SpaceID,
+		DatasetID:     job.DatasetID,
+		JobType:       dataset_job.JobType(job.JobType),
+		Source:        OpenAPIDatasetIOEndpointDO2DTO(job.Source),
+		Target:        OpenAPIDatasetIOEndpointDO2DTO(job.Target),
+		FieldMappings: OpenAPIDatasetIOFieldMappingsDO2DTO(job.FieldMappings),
+		Option:        OpenAPIDatasetIOJobOptionDO2DTO(job.Option),
+		Status:        (*dataset_job.JobStatus)(job.Status),
+		Progress:      OpenAPIDatasetIOJobProgressDO2DTO(job.Progress),
+		Errors:        OpenAPIDatasetIOJobErrorsDO2DTO(job.Errors),
+		CreatedBy:     job.CreatedBy,
+		CreatedAt:     job.CreatedAt,
+		UpdatedBy:     job.UpdatedBy,
+		UpdatedAt:     job.UpdatedAt,
+		StartedAt:     job.StartedAt,
+		EndedAt:       job.EndedAt,
+	}
+}
+
+func OpenAPIDatasetIOEndpointDO2DTO(endpoint *entity.DatasetIOEndpoint) *dataset_job.DatasetIOEndpoint {
+	if endpoint == nil {
+		return nil
+	}
+	return &dataset_job.DatasetIOEndpoint{
+		File:    OpenAPIDatasetIOFileDO2DTO(endpoint.File),
+		Dataset: OpenAPIDatasetIODatasetDO2DTO(endpoint.Dataset),
+	}
+}
+
+func OpenAPIDatasetIOFileDO2DTO(file *entity.DatasetIOFile) *dataset_job.DatasetIOFile {
+	if file == nil {
+		return nil
+	}
+	provider := dataset.StorageProvider(file.Provider)
+
+	return &dataset_job.DatasetIOFile{
+		Provider:         provider,
+		Path:             file.Path,
+		Format:           (*dataset_job.FileFormat)(file.Format),
+		CompressFormat:   (*dataset_job.FileFormat)(file.CompressFormat),
+		Files:            file.Files,
+		OriginalFileName: file.OriginalFileName,
+		DownloadURL:      file.DownloadURL,
+		ProviderID:       file.ProviderID,
+		ProviderAuth:     OpenAPIProviderAuthDO2DTO(file.ProviderAuth),
+	}
+}
+
+func OpenAPIProviderAuthDO2DTO(auth *entity.ProviderAuth) *dataset_job.ProviderAuth {
+	if auth == nil {
+		return nil
+	}
+	return &dataset_job.ProviderAuth{
+		ProviderAccountID: auth.ProviderAccountID,
+	}
+}
+
+func OpenAPIDatasetIODatasetDO2DTO(ds *entity.DatasetIODataset) *dataset_job.DatasetIODataset {
+	if ds == nil {
+		return nil
+	}
+	return &dataset_job.DatasetIODataset{
+		SpaceID:   ds.SpaceID,
+		DatasetID: ds.DatasetID,
+		VersionID: ds.VersionID,
+	}
+}
+
+func OpenAPIDatasetIOFieldMappingsDO2DTO(mappings []*entity.FieldMapping) []*dataset_job.FieldMapping {
+	if len(mappings) == 0 {
+		return nil
+	}
+	res := make([]*dataset_job.FieldMapping, len(mappings))
+	for i, m := range mappings {
+		res[i] = &dataset_job.FieldMapping{
+			Source: m.Source,
+			Target: m.Target,
+		}
+	}
+	return res
+}
+
+func OpenAPIDatasetIOJobOptionDO2DTO(opt *entity.DatasetIOJobOption) *dataset_job.DatasetIOJobOption {
+	if opt == nil {
+		return nil
+	}
+	return &dataset_job.DatasetIOJobOption{
+		OverwriteDataset: opt.OverwriteDataset,
+	}
+}
+
+func OpenAPIDatasetIOJobProgressDO2DTO(progress *entity.DatasetIOJobProgress) *dataset_job.DatasetIOJobProgress {
+	if progress == nil {
+		return nil
+	}
+	return &dataset_job.DatasetIOJobProgress{
+		Total:         progress.Total,
+		Processed:     progress.Processed,
+		Added:         progress.Added,
+		Name:          progress.Name,
+		SubProgresses: OpenAPIDatasetIOJobSubProgressesDO2DTO(progress.SubProgresses),
+	}
+}
+
+func OpenAPIDatasetIOJobSubProgressesDO2DTO(progresses []*entity.DatasetIOJobProgress) []*dataset_job.DatasetIOJobProgress {
+	if len(progresses) == 0 {
+		return nil
+	}
+	res := make([]*dataset_job.DatasetIOJobProgress, len(progresses))
+	for i, p := range progresses {
+		res[i] = OpenAPIDatasetIOJobProgressDO2DTO(p)
+	}
+	return res
+}
+
+func OpenAPIDatasetIOJobErrorsDO2DTO(errors []*entity.ItemErrorGroup) []*dataset.ItemErrorGroup {
+	if len(errors) == 0 {
+		return nil
+	}
+	res := make([]*dataset.ItemErrorGroup, len(errors))
+	for i, e := range errors {
+		res[i] = OpenAPIDatasetIOJobErrorGroupDO2DTO(e)
+	}
+	return res
+}
+
+func OpenAPIDatasetIOJobErrorGroupDO2DTO(e *entity.ItemErrorGroup) *dataset.ItemErrorGroup {
+	if e == nil {
+		return nil
+	}
+	var typ *dataset.ItemErrorType
+	if e.Type != nil {
+		t := dataset.ItemErrorType(*e.Type)
+		typ = &t
+	}
+	return &dataset.ItemErrorGroup{
+		Type:       typ,
+		Summary:    e.Summary,
+		ErrorCount: e.ErrorCount,
+		Details:    OpenAPIDatasetIOJobErrorDetailsDO2DTO(e.Details),
+	}
+}
+
+func OpenAPIDatasetIOJobErrorDetailsDO2DTO(details []*entity.ItemErrorDetail) []*dataset.ItemErrorDetail {
+	if len(details) == 0 {
+		return nil
+	}
+	res := make([]*dataset.ItemErrorDetail, len(details))
+	for i, d := range details {
+		res[i] = &dataset.ItemErrorDetail{
+			Message:    d.Message,
+			Index:      d.Index,
+			StartIndex: d.StartIndex,
+			EndIndex:   d.EndIndex,
+		}
+	}
+	return res
+}
+
+func OpenAPIDatasetIOJobOptionDTO2DO(opt *dataset_job.DatasetIOJobOption) *entity.DatasetIOJobOption {
+	if opt == nil {
+		return nil
+	}
+	return &entity.DatasetIOJobOption{
+		OverwriteDataset: opt.OverwriteDataset,
+	}
+}
+
+func OpenAPIFieldWriteOptionDTO2DOs(dtos []*openapi_eval_set.FieldWriteOption) []*entity.FieldWriteOption {
+	if dtos == nil {
+		return nil
+	}
+	var res []*entity.FieldWriteOption
+	for _, dto := range dtos {
+		res = append(res, OpenAPIFieldWriteOptionDTO2DO(dto))
+	}
+	return res
+}
+
+func OpenAPIFieldWriteOptionDTO2DO(dto *openapi_eval_set.FieldWriteOption) *entity.FieldWriteOption {
+	if dto == nil {
+		return nil
+	}
+	var contentType *entity.ContentType
+	if dto.ModalityType != nil {
+		t := entity.ContentType(*dto.ModalityType)
+		contentType = &t
+	}
+	var strategy *entity.MultiModalStoreStrategy
+	if dto.MultiModalStoreOpt != nil && dto.MultiModalStoreOpt.MultiModalStoreStrategy != nil {
+		s := entity.MultiModalStoreStrategy(*dto.MultiModalStoreOpt.MultiModalStoreStrategy)
+		strategy = &s
+	}
+	var opt *entity.MultiModalStoreOption
+	if strategy != nil || contentType != nil {
+		opt = &entity.MultiModalStoreOption{
+			MultiModalStoreStrategy: strategy,
+			ContentType:             contentType,
+		}
+	}
+	return &entity.FieldWriteOption{
+		FieldName:          dto.FieldName,
+		FieldKey:           dto.FieldKey,
+		MultiModalStoreOpt: opt,
 	}
 }

@@ -30,8 +30,23 @@ const (
 	ContentType_Text  ContentType = "Text"
 	ContentType_Image ContentType = "Image"
 	ContentType_Audio ContentType = "Audio"
+	ContentType_Video ContentType = "Video"
 	// 图文混排
 	ContentType_MultiPart ContentType = "MultiPart"
+)
+
+type SchemaKey int64
+
+const (
+	SchemaKey_String  SchemaKey = 1
+	SchemaKey_Integer SchemaKey = 2
+	SchemaKey_Float   SchemaKey = 3
+	SchemaKey_Bool    SchemaKey = 4
+	SchemaKey_Message SchemaKey = 5
+	// 单选
+	SchemaKey_SingleChoice SchemaKey = 6
+	// 轨迹
+	SchemaKey_Trajectory SchemaKey = 7
 )
 
 type FieldDisplayFormat int64
@@ -100,6 +115,7 @@ type FieldSchema struct {
 	ContentType ContentType
 	// [20,50) 内容格式限制相关
 	TextSchema    string
+	SchemaKey     SchemaKey
 	DisplayFormat FieldDisplayFormat
 }
 
@@ -196,9 +212,21 @@ type Content struct {
 	ContentType ContentType
 	Text        string
 	Image       *Image
+	Audio       *Audio
+	Video       *Video
 	MultiPart   []*Content
 }
 type Image struct {
+	Name string
+	Url  string
+}
+
+type Audio struct {
+	Name string
+	Url  string
+}
+
+type Video struct {
 	Name string
 	Url  string
 }
@@ -217,6 +245,38 @@ func (i *Image) GetUrl() string {
 		return ""
 	}
 	return i.Url
+}
+
+// GetName returns the name of the audio
+func (a *Audio) GetName() string {
+	if a == nil {
+		return ""
+	}
+	return a.Name
+}
+
+// GetUrl returns the URL of the audio
+func (a *Audio) GetUrl() string {
+	if a == nil {
+		return ""
+	}
+	return a.Url
+}
+
+// GetName returns the name of the video
+func (v *Video) GetName() string {
+	if v == nil {
+		return ""
+	}
+	return v.Name
+}
+
+// GetUrl returns the URL of the video
+func (v *Video) GetUrl() string {
+	if v == nil {
+		return ""
+	}
+	return v.Url
 }
 
 // GetContentType returns the content type of the content
@@ -241,6 +301,22 @@ func (c *Content) GetImage() *Image {
 		return nil
 	}
 	return c.Image
+}
+
+// GetAudio returns the audio content
+func (c *Content) GetAudio() *Audio {
+	if c == nil {
+		return nil
+	}
+	return c.Audio
+}
+
+// GetVideo returns the video content
+func (c *Content) GetVideo() *Video {
+	if c == nil {
+		return nil
+	}
+	return c.Video
 }
 
 // GetMultiPart returns the multi-part content
@@ -296,6 +372,10 @@ type FieldMapping struct {
 	TraceFieldJsonpath string
 }
 
+func (f *FieldMapping) IsTrajectory() bool {
+	return f.FieldSchema.SchemaKey == SchemaKey_Trajectory
+}
+
 type ItemErrorGroup struct {
 	Type    int64
 	Summary string
@@ -310,8 +390,9 @@ type ItemErrorDetail struct {
 	// 单条错误数据在输入数据中的索引。从 0 开始，下同
 	Index *int32
 	// [startIndex, endIndex] 表示区间错误范围, 如 ExceedDatasetCapacity 错误时
-	StartIndex *int32
-	EndIndex   *int32
+	StartIndex      *int32
+	EndIndex        *int32
+	MessagesByField map[string]string
 }
 
 const (
@@ -342,6 +423,28 @@ func GetContentInfo(ctx context.Context, contentType ContentType, value string) 
 					Image: &Image{
 						Name: part.ImageURL.Name,
 						Url:  part.ImageURL.URL,
+					},
+				})
+			case tracespec.ModelMessagePartTypeAudio:
+				if part.AudioURL == nil {
+					continue
+				}
+				multiPart = append(multiPart, &Content{
+					ContentType: ContentType_Audio,
+					Audio: &Audio{
+						Name: part.AudioURL.Name,
+						Url:  part.AudioURL.URL,
+					},
+				})
+			case tracespec.ModelMessagePartTypeVideo:
+				if part.VideoURL == nil {
+					continue
+				}
+				multiPart = append(multiPart, &Content{
+					ContentType: ContentType_Video,
+					Video: &Video{
+						Name: part.VideoURL.Name,
+						Url:  part.VideoURL.URL,
 					},
 				})
 			case tracespec.ModelMessagePartTypeText, tracespec.ModelMessagePartTypeFile:
@@ -375,6 +478,8 @@ func CommonContentTypeDO2DTO(contentType ContentType) *common.ContentType {
 		return gptr.Of(common.ContentTypeImage)
 	case ContentType_Audio:
 		return gptr.Of(common.ContentTypeAudio)
+	case ContentType_Video:
+		return gptr.Of(common.ContentTypeVideo)
 	case ContentType_MultiPart:
 		return gptr.Of(common.ContentTypeMultiPart)
 	default:

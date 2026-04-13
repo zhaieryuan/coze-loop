@@ -6,22 +6,27 @@ package tracehub
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.uber.org/mock/gomock"
 
+	lock_mocks "github.com/coze-dev/coze-loop/backend/infra/lock/mocks"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/common"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/task"
+	taskconvertor "github.com/coze-dev/coze-loop/backend/modules/observability/application/convertor/task"
 	componentconfig "github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
+	config_mocks "github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config/mocks"
+	tenant_mocks "github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/tenant/mocks"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	repo_mocks "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/repo/mocks"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/processor"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity/loop_span"
 	trace_service_mocks "github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/service/mocks"
 	span_filter_mocks "github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/service/trace/span_filter/mocks"
-	pkgconf "github.com/coze-dev/coze-loop/backend/pkg/conf"
-	confmocks "github.com/coze-dev/coze-loop/backend/pkg/conf/mocks"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/ptr"
 	"github.com/stretchr/testify/require"
 )
@@ -29,8 +34,10 @@ import (
 func TestTraceHubServiceImpl_SpanTriggerSkipNoWorkspace(t *testing.T) {
 	t.Parallel()
 
-	impl := &TraceHubServiceImpl{}
-	impl.taskCache.Store("ObjListWithTask", TaskCacheInfo{})
+	impl := &TraceHubServiceImpl{
+		localCache: NewLocalCache(),
+	}
+	impl.localCache.taskCache.Store("ObjListWithTask", TaskCacheInfo{})
 
 	raw := &entity.RawSpan{
 		TraceID: "trace",
@@ -45,7 +52,7 @@ func TestTraceHubServiceImpl_SpanTriggerSkipNoWorkspace(t *testing.T) {
 		ServerEnv:     &entity.ServerInRawSpan{},
 	}
 
-	require.NoError(t, impl.SpanTrigger(context.Background(), raw))
+	require.NoError(t, impl.SpanTrigger(context.Background(), raw.RawSpanConvertToLoopSpan()))
 }
 
 func TestTraceHubServiceImpl_SpanTriggerDispatchError(t *testing.T) {
@@ -57,18 +64,20 @@ func TestTraceHubServiceImpl_SpanTriggerDispatchError(t *testing.T) {
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
 	mockBuilder := trace_service_mocks.NewMockTraceFilterProcessorBuilder(ctrl)
 	mockFilter := span_filter_mocks.NewMockFilter(ctrl)
-	configLoader := confmocks.NewMockIConfigLoader(ctrl)
+	configLoader := config_mocks.NewMockITraceConfig(ctrl)
+	tenantProvider := tenant_mocks.NewMockITenantProvider(ctrl)
+	mockTraceService := trace_service_mocks.NewMockITraceService(ctrl)
 
 	now := time.Now()
 	workspaceID := int64(1)
 	taskDO := &entity.ObservabilityTask{
 		ID:          1,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskTypeAutoEval,
-		TaskStatus:  task.TaskStatusRunning,
+		TaskType:    entity.TaskTypeAutoEval,
+		TaskStatus:  entity.TaskStatusRunning,
 		SpanFilter: &entity.SpanFilterFields{
-			PlatformType: common.PlatformTypeLoopAll,
-			SpanListType: common.SpanListTypeAllSpan,
+			PlatformType: loop_span.PlatformDefault,
+			SpanListType: loop_span.SpanListTypeAllSpan,
 			Filters: loop_span.FilterFields{
 				QueryAndOr:   ptr.Of(loop_span.QueryAndOrEnumAnd),
 				FilterFields: []*loop_span.FilterField{},
@@ -88,33 +97,40 @@ func TestTraceHubServiceImpl_SpanTriggerDispatchError(t *testing.T) {
 				ID:          101,
 				TaskID:      1,
 				WorkspaceID: workspaceID,
-				TaskType:    task.TaskRunTypeNewData,
-				RunStatus:   task.TaskStatusRunning,
+				TaskType:    entity.TaskRunTypeNewData,
+				RunStatus:   entity.TaskRunStatusRunning,
 				RunStartAt:  now.Add(-30 * time.Minute),
 				RunEndAt:    now.Add(30 * time.Minute),
 			},
 		},
 	}
 
+	mockRepo.EXPECT().ListNonFinalTaskBySpaceID(gomock.Any(), gomock.Any()).Return([]int64{taskDO.ID}, nil).AnyTimes()
+
+	configLoader.EXPECT().GetConsumerListening(gomock.Any()).Return(&componentconfig.ConsumerListening{IsAllSpace: true}, nil).AnyTimes()
 	configLoader.EXPECT().UnmarshalKey(gomock.Any(), "consumer_listening", gomock.Any()).DoAndReturn(
-		func(_ context.Context, _ string, value any, _ ...pkgconf.DecodeOptionFn) error {
+		func(_ context.Context, _ string, value any, _ ...interface{}) error {
 			cfg := value.(*componentconfig.ConsumerListening)
 			*cfg = componentconfig.ConsumerListening{IsAllSpace: true}
 			return nil
 		},
 	).AnyTimes()
-	mockRepo.EXPECT().ListNonFinalTask(gomock.Any(), "space-1").Return([]int64{taskDO.ID}, nil).AnyTimes()
-	mockRepo.EXPECT().GetTaskByRedis(gomock.Any(), taskDO.ID).Return(taskDO, nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskByCache(gomock.Any(), taskDO.ID).Return(taskDO, nil).AnyTimes()
 	mockFilter.EXPECT().BuildBasicSpanFilter(gomock.Any(), gomock.Any()).Return(nil, false, nil).AnyTimes()
 	mockFilter.EXPECT().BuildALLSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 	mockBuilder.EXPECT().BuildPlatformRelatedFilter(gomock.Any(), gomock.Any()).Return(mockFilter, nil).AnyTimes()
+	tenantProvider.EXPECT().GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformDefault, gomock.Any()).Return([]string{"tenant"}, nil).AnyTimes()
+	mockTraceService.EXPECT().
+		MergeHistoryMessagesByRespIDBatch(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
 
 	spanRun := &entity.TaskRun{
 		ID:          201,
 		TaskID:      1,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
-		RunStatus:   task.TaskStatusRunning,
+		TaskType:    entity.TaskRunTypeNewData,
+		RunStatus:   entity.TaskRunStatusRunning,
 		RunStartAt:  now.Add(-15 * time.Minute),
 		RunEndAt:    now.Add(15 * time.Minute),
 	}
@@ -122,17 +138,21 @@ func TestTraceHubServiceImpl_SpanTriggerDispatchError(t *testing.T) {
 	mockRepo.EXPECT().GetTaskCount(gomock.Any(), int64(1)).Return(int64(0), nil).AnyTimes()
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), int64(1), spanRun.ID).Return(int64(0), nil).AnyTimes()
 
-	proc := &stubProcessor{invokeErr: errors.New("invoke error"), createTaskRunErr: errors.New("create run error")}
+	procMock := &stubProcessor{invokeErr: errors.New("invoke error"), createTaskRunErr: errors.New("create run error")}
+
 	taskProcessor := processor.NewTaskProcessor()
-	taskProcessor.Register(task.TaskTypeAutoEval, proc)
+	taskProcessor.Register(entity.TaskTypeAutoEval, procMock)
 
 	impl := &TraceHubServiceImpl{
-		taskRepo:      mockRepo,
-		buildHelper:   mockBuilder,
-		taskProcessor: taskProcessor,
-		loader:        configLoader,
+		taskRepo:       mockRepo,
+		buildHelper:    mockBuilder,
+		taskProcessor:  taskProcessor,
+		localCache:     NewLocalCache(),
+		config:         configLoader,
+		tenantProvider: tenantProvider,
+		traceService:   mockTraceService,
 	}
-	impl.taskCache.Store("ObjListWithTask", TaskCacheInfo{WorkspaceIDs: []string{"space-1"}, Tasks: []*entity.ObservabilityTask{taskDO}})
+	impl.localCache.taskCache.Store("ObjListWithTask", TaskCacheInfo{WorkspaceIDs: []string{"space-1"}, Tasks: []*entity.ObservabilityTask{taskDO}})
 
 	raw := &entity.RawSpan{
 		TraceID:       "trace",
@@ -140,20 +160,19 @@ func TestTraceHubServiceImpl_SpanTriggerDispatchError(t *testing.T) {
 		LogID:         "log",
 		StartTimeInUs: now.UnixMicro(),
 		Tags: map[string]any{
-			"fornax_space_id": "space-1",
-			"call_type":       "",
-			"bot_id":          "bot-1",
-		},
-		SystemTags: map[string]any{
+			"fornax_space_id":         "space-1",
+			"call_type":               "",
+			"bot_id":                  "bot-1",
 			loop_span.SpanFieldTenant: "tenant",
 		},
+		SystemTags:    map[string]any{},
 		SensitiveTags: &entity.SensitiveTags{},
 		ServerEnv:     &entity.ServerInRawSpan{},
 	}
 
-	err := impl.SpanTrigger(context.Background(), raw)
-	require.NoError(t, err)
-	require.True(t, proc.invokeCalled)
+	err := impl.SpanTrigger(context.Background(), raw.RawSpanConvertToLoopSpan())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invoke error")
 }
 
 func TestTraceHubServiceImpl_preDispatchHandlesUnstartedAndLimits(t *testing.T) {
@@ -161,7 +180,7 @@ func TestTraceHubServiceImpl_preDispatchHandlesUnstartedAndLimits(t *testing.T) 
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{}
+	procMock := &stubProcessor{}
 
 	now := time.Now()
 	startAt := now.Add(-2 * time.Hour).UnixMilli()
@@ -187,54 +206,49 @@ func TestTraceHubServiceImpl_preDispatchHandlesUnstartedAndLimits(t *testing.T) 
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          303,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-90 * time.Minute),
 		RunEndAt:    now.Add(-30 * time.Minute),
 	}
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil).AnyTimes()
 	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(1), nil)
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(1), nil)
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{
-		StartTime: now.UnixMilli(),
-		TraceID:   "trace",
-		SpanID:    "span",
-	}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.NoError(t, err)
-	require.Equal(t, 2, len(stubProc.createTaskRunReqs))
-	require.Equal(t, startAt, stubProc.createTaskRunReqs[0].RunStartAt)
-	require.True(t, stubProc.createTaskRunReqs[0].RunEndAt > startAt)
-	require.Equal(t, taskRunConfig.RunEndAt.UnixMilli(), stubProc.createTaskRunReqs[1].RunStartAt)
-	require.Equal(t, 1, stubProc.updateCallCount)
-	require.Equal(t, 4, stubProc.finishChangeInvoked)
-	require.Len(t, stubProc.finishChangeReqs, 4)
-	require.True(t, stubProc.finishChangeReqs[0].IsFinish)
-	require.True(t, stubProc.finishChangeReqs[1].IsFinish)
-	require.False(t, stubProc.finishChangeReqs[2].IsFinish)
-	require.False(t, stubProc.finishChangeReqs[3].IsFinish)
+	require.Equal(t, 2, len(procMock.createTaskRunReqs))
+	require.Equal(t, startAt, procMock.createTaskRunReqs[0].RunStartAt)
+	require.True(t, procMock.createTaskRunReqs[0].RunEndAt > startAt)
+	require.Equal(t, taskRunConfig.RunEndAt.UnixMilli(), procMock.createTaskRunReqs[1].RunStartAt)
+	require.Equal(t, 1, procMock.updateCallCount)
+	require.Equal(t, 4, procMock.finishChangeInvoked)
+	require.Len(t, procMock.finishChangeReqs, 4)
+	require.True(t, procMock.finishChangeReqs[0].IsFinish)
+	require.True(t, procMock.finishChangeReqs[1].IsFinish)
+	require.False(t, procMock.finishChangeReqs[2].IsFinish)
+	require.False(t, procMock.finishChangeReqs[3].IsFinish)
 }
 
 func TestTraceHubServiceImpl_preDispatchHandlesMissingTaskRunConfig(t *testing.T) {
@@ -242,7 +256,7 @@ func TestTraceHubServiceImpl_preDispatchHandlesMissingTaskRunConfig(t *testing.T
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{createTaskRunErr: errors.New("create run failed")}
+	procMock := &stubProcessor{createTaskRunErr: errors.New("create run failed")}
 
 	now := time.Now()
 	startAt := now.Add(-10 * time.Minute).UnixMilli()
@@ -264,37 +278,376 @@ func TestTraceHubServiceImpl_preDispatchHandlesMissingTaskRunConfig(t *testing.T
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{
-		StartTime: now.UnixMilli(),
-		TraceID:   "trace",
-		SpanID:    "span",
-	}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "task run config not found")
-	require.Equal(t, 1, len(stubProc.createTaskRunReqs))
-	require.Equal(t, startAt, stubProc.createTaskRunReqs[0].RunStartAt)
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
+	require.Equal(t, startAt, procMock.createTaskRunReqs[0].RunStartAt)
 	expectedEnd := startAt + 2*7*24*time.Hour.Milliseconds()
-	require.Equal(t, expectedEnd, stubProc.createTaskRunReqs[0].RunEndAt)
-	require.Equal(t, 0, stubProc.finishChangeInvoked)
+	require.Equal(t, expectedEnd, procMock.createTaskRunReqs[0].RunEndAt)
+	require.Equal(t, 0, procMock.finishChangeInvoked)
+}
+
+func TestTraceHubServiceImpl_preDispatchDedupTaskRunCreateWithLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
+	mockLocker := lock_mocks.NewMockILocker(ctrl)
+	procMock := &stubProcessor{}
+
+	now := time.Now()
+	startAt := now.Add(-10 * time.Minute).UnixMilli()
+	endAt := now.Add(time.Hour).UnixMilli()
+	workspaceID := int64(3103)
+	taskID := int64(3204)
+
+	sampl := &task.Sampler{
+		SampleRate: floatPtr(1),
+		SampleSize: int64Ptr(5),
+		IsCycle:    boolPtr(false),
+	}
+	rule := &task.Rule{
+		EffectiveTime: &task.EffectiveTime{
+			StartAt: ptr.Of(startAt),
+			EndAt:   ptr.Of(endAt),
+		},
+		Sampler: sampl,
+	}
+
+	sub := &spanSubscriber{
+		taskID:    taskID,
+		processor: procMock,
+		taskRepo:  mockRepo,
+		runType:   entity.TaskRunTypeNewData,
+	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
+
+	taskRunConfig := &entity.TaskRun{
+		ID:          3305,
+		TaskID:      taskID,
+		WorkspaceID: workspaceID,
+		TaskType:    entity.TaskRunTypeNewData,
+		RunStatus:   task.TaskStatusRunning,
+		RunStartAt:  time.UnixMilli(startAt),
+		RunEndAt:    time.UnixMilli(endAt),
+	}
+
+	getLatestCall := 0
+	mockRepo.EXPECT().
+		GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).
+		DoAndReturn(func(context.Context, *int64, int64) (*entity.TaskRun, error) {
+			getLatestCall++
+			if getLatestCall == 1 {
+				return nil, nil
+			}
+			return taskRunConfig, nil
+		}).
+		AnyTimes()
+	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil).AnyTimes()
+
+	mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	mockLocker.EXPECT().Unlock(gomock.Any()).Return(true, nil).AnyTimes()
+
+	impl := &TraceHubServiceImpl{taskRepo: mockRepo, locker: mockLocker}
+
+	require.NoError(t, impl.preDispatch(context.Background(), []*spanSubscriber{sub}))
+	require.NoError(t, impl.preDispatch(context.Background(), []*spanSubscriber{sub}))
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
+	require.Equal(t, 1, procMock.updateCallCount)
+}
+
+func TestTraceHubServiceImpl_preDispatchConcurrent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
+	mockLocker := lock_mocks.NewMockILocker(ctrl)
+
+	now := time.Now()
+	startAt := now.Add(-10 * time.Minute).UnixMilli()
+	endAt := now.Add(time.Hour).UnixMilli()
+	workspaceID := int64(3301)
+	taskID := int64(3402)
+
+	sampl := &task.Sampler{
+		SampleRate: floatPtr(1),
+		SampleSize: int64Ptr(5),
+		IsCycle:    boolPtr(false),
+	}
+	rule := &task.Rule{
+		EffectiveTime: &task.EffectiveTime{
+			StartAt: ptr.Of(startAt),
+			EndAt:   ptr.Of(endAt),
+		},
+		Sampler: sampl,
+	}
+
+	// 构造基础 task DO，后续在 goroutine 中深拷贝使用
+	baseTask := toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
+
+	taskRunConfig := &entity.TaskRun{
+		ID:          3503,
+		TaskID:      taskID,
+		WorkspaceID: workspaceID,
+		TaskType:    entity.TaskRunTypeNewData,
+		RunStatus:   task.TaskStatusRunning,
+		RunStartAt:  time.UnixMilli(startAt),
+		RunEndAt:    time.UnixMilli(endAt),
+	}
+
+	// 并发控制状态
+	var createCount int32
+	var taskRunCreated atomic.Bool
+
+	// 1. 模拟 GetLatestNewDataTaskRun：
+	//    - 如果已经创建过 (taskRunCreated=true)，返回存在的 config
+	//    - 否则返回 nil，触发创建逻辑
+	mockRepo.EXPECT().
+		GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).
+		DoAndReturn(func(context.Context, *int64, int64) (*entity.TaskRun, error) {
+			if taskRunCreated.Load() {
+				return taskRunConfig, nil
+			}
+			return nil, nil
+		}).
+		AnyTimes()
+
+	// 模拟 Lock/Unlock：总是成功
+	mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	mockLocker.EXPECT().Unlock(gomock.Any()).Return(true, nil).AnyTimes()
+
+	safeProc := &concurrentStubProcessor{
+		createAction: func() error {
+			atomic.AddInt32(&createCount, 1)
+			taskRunCreated.Store(true)
+			time.Sleep(10 * time.Millisecond)
+			return nil
+		},
+	}
+
+	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil).AnyTimes()
+
+	impl := &TraceHubServiceImpl{taskRepo: mockRepo, locker: mockLocker}
+
+	concurrency := 10
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			myTask := *baseTask
+
+			mySub := &spanSubscriber{
+				taskID:    taskID,
+				processor: safeProc,
+				taskRepo:  mockRepo,
+				runType:   entity.TaskRunTypeNewData,
+				t:         &myTask,
+			}
+			_ = impl.preDispatch(context.Background(), []*spanSubscriber{mySub})
+		}()
+	}
+
+	wg.Wait()
+	require.Equal(t, int32(1), atomic.LoadInt32(&createCount))
+}
+
+func TestTraceHubServiceImpl_preDispatchHandlesUnstartedTaskWithExistingRunConfig(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
+	mockLocker := lock_mocks.NewMockILocker(ctrl)
+	procMock := &stubProcessor{}
+
+	now := time.Now()
+	startAt := now.Add(-10 * time.Minute).UnixMilli()
+	endAt := now.Add(time.Hour).UnixMilli()
+	workspaceID := int64(3601)
+	taskID := int64(3702)
+
+	sampl := &task.Sampler{
+		SampleRate: floatPtr(1),
+		SampleSize: int64Ptr(5),
+		IsCycle:    boolPtr(false),
+	}
+	rule := &task.Rule{
+		EffectiveTime: &task.EffectiveTime{
+			StartAt: ptr.Of(startAt),
+			EndAt:   ptr.Of(endAt),
+		},
+		Sampler: sampl,
+	}
+
+	sub := &spanSubscriber{
+		taskID:    taskID,
+		processor: procMock,
+		taskRepo:  mockRepo,
+		runType:   entity.TaskRunTypeNewData,
+	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
+
+	taskRunConfig := &entity.TaskRun{
+		ID:          3803,
+		TaskID:      taskID,
+		WorkspaceID: workspaceID,
+		TaskType:    entity.TaskRunTypeNewData,
+		RunStatus:   task.TaskStatusRunning,
+		RunStartAt:  time.UnixMilli(startAt),
+		RunEndAt:    time.UnixMilli(endAt),
+	}
+
+	// 模拟 GetLatestNewDataTaskRun 返回已存在的配置
+	mockRepo.EXPECT().
+		GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).
+		Return(taskRunConfig, nil).
+		AnyTimes()
+
+	// 模拟 Lock/Unlock
+	mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	mockLocker.EXPECT().Unlock(gomock.Any()).Return(true, nil).AnyTimes()
+
+	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil).AnyTimes()
+
+	impl := &TraceHubServiceImpl{taskRepo: mockRepo, locker: mockLocker}
+
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
+	require.NoError(t, err)
+
+	require.Empty(t, procMock.createTaskRunReqs)
+	// 应调用 OnTaskUpdated 将状态更新为 Running
+	require.Equal(t, 1, procMock.updateCallCount)
+}
+
+func TestTraceHubServiceImpl_preDispatchHandlesUnstartedTaskWithExistingRunConfig_UpdateError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
+	mockLocker := lock_mocks.NewMockILocker(ctrl)
+	procMock := &stubProcessor{updateErr: errors.New("update fail")}
+
+	now := time.Now()
+	startAt := now.Add(-10 * time.Minute).UnixMilli()
+	endAt := now.Add(time.Hour).UnixMilli()
+	workspaceID := int64(3901)
+	taskID := int64(4002)
+
+	sampl := &task.Sampler{
+		SampleRate: floatPtr(1),
+		SampleSize: int64Ptr(5),
+		IsCycle:    boolPtr(false),
+	}
+	rule := &task.Rule{
+		EffectiveTime: &task.EffectiveTime{
+			StartAt: ptr.Of(startAt),
+			EndAt:   ptr.Of(endAt),
+		},
+		Sampler: sampl,
+	}
+
+	sub := &spanSubscriber{
+		taskID:    taskID,
+		processor: procMock,
+		taskRepo:  mockRepo,
+		runType:   entity.TaskRunTypeNewData,
+	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
+
+	taskRunConfig := &entity.TaskRun{
+		ID:          4103,
+		TaskID:      taskID,
+		WorkspaceID: workspaceID,
+		TaskType:    entity.TaskRunTypeNewData,
+		RunStatus:   task.TaskStatusRunning,
+		RunStartAt:  time.UnixMilli(startAt),
+		RunEndAt:    time.UnixMilli(endAt),
+	}
+
+	mockRepo.EXPECT().
+		GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).
+		Return(taskRunConfig, nil).
+		AnyTimes()
+
+	mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	mockLocker.EXPECT().Unlock(gomock.Any()).Return(true, nil).AnyTimes()
+
+	impl := &TraceHubServiceImpl{taskRepo: mockRepo, locker: mockLocker}
+
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
+	// 因为返回的是 errSkipSubscriber，在 loop 中会被 swallow 掉，所以外层 err 应该是 nil
+	require.NoError(t, err)
+
+	require.Empty(t, procMock.createTaskRunReqs)
+	require.Equal(t, 1, procMock.updateCallCount)
+}
+
+// 线程安全的桩 Processor
+type concurrentStubProcessor struct {
+	stubProcessor // 继承其他方法的默认实现
+	createAction  func() error
+}
+
+func (p *concurrentStubProcessor) OnTaskRunCreated(ctx context.Context, req taskexe.OnTaskRunCreatedReq) error {
+	if p.createAction != nil {
+		return p.createAction()
+	}
+	return nil
+}
+
+func (p *concurrentStubProcessor) OnTaskUpdated(ctx context.Context, task *entity.ObservabilityTask, status entity.TaskStatus) error {
+	return nil
 }
 
 func TestTraceHubServiceImpl_preDispatchHandlesNonCycle(t *testing.T) {
@@ -302,7 +655,7 @@ func TestTraceHubServiceImpl_preDispatchHandlesNonCycle(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{}
+	procMock := &stubProcessor{}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -324,47 +677,42 @@ func TestTraceHubServiceImpl_preDispatchHandlesNonCycle(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          707,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-30 * time.Minute),
 		RunEndAt:    now.Add(30 * time.Minute),
 	}
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil).AnyTimes()
 	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil)
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil)
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{
-		StartTime: now.UnixMilli(),
-		TraceID:   "trace",
-		SpanID:    "span",
-	}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.NoError(t, err)
-	require.Equal(t, 1, len(stubProc.createTaskRunReqs))
-	require.Equal(t, endAt, stubProc.createTaskRunReqs[0].RunEndAt)
-	require.Equal(t, 1, stubProc.updateCallCount)
-	require.Zero(t, stubProc.finishChangeInvoked)
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
+	require.Equal(t, endAt, procMock.createTaskRunReqs[0].RunEndAt)
+	require.Equal(t, 1, procMock.updateCallCount)
+	require.Zero(t, procMock.finishChangeInvoked)
 }
 
 func TestTraceHubServiceImpl_preDispatchHandlesCycleDefaultUnit(t *testing.T) {
@@ -372,7 +720,7 @@ func TestTraceHubServiceImpl_preDispatchHandlesCycleDefaultUnit(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{createTaskRunErrSeq: []error{nil, errors.New("create fail")}}
+	procMock := &stubProcessor{createTaskRunErrSeq: []error{nil, errors.New("create fail")}}
 
 	now := time.Now()
 	startAt := now.Add(-15 * time.Minute).UnixMilli()
@@ -393,36 +741,31 @@ func TestTraceHubServiceImpl_preDispatchHandlesCycleDefaultUnit(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{
-		StartTime: now.UnixMilli(),
-		TraceID:   "trace",
-		SpanID:    "span",
-	}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "create fail")
-	require.Equal(t, 2, len(stubProc.createTaskRunReqs))
+	require.Equal(t, 2, len(procMock.createTaskRunReqs))
 	delta := int64(3) * 10 * time.Minute.Milliseconds()
-	require.Equal(t, startAt+delta, stubProc.createTaskRunReqs[0].RunEndAt)
-	require.Equal(t, startAt+delta, stubProc.createTaskRunReqs[1].RunEndAt)
+	require.Equal(t, startAt+delta, procMock.createTaskRunReqs[0].RunEndAt)
+	require.Equal(t, startAt+delta, procMock.createTaskRunReqs[1].RunEndAt)
 }
 
 func TestTraceHubServiceImpl_preDispatchTimeLimitFinishError(t *testing.T) {
@@ -430,7 +773,7 @@ func TestTraceHubServiceImpl_preDispatchTimeLimitFinishError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{finishErrSeq: []error{errors.New("finish error")}}
+	procMock := &stubProcessor{finishErrSeq: []error{errors.New("finish error")}}
 
 	now := time.Now()
 	startAt := now.Add(-2 * time.Hour).UnixMilli()
@@ -455,41 +798,40 @@ func TestTraceHubServiceImpl_preDispatchTimeLimitFinishError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          1101,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-3 * time.Hour),
 		RunEndAt:    now.Add(-2 * time.Hour),
 	}
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil)
-	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil)
-	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "finish error")
-	require.Equal(t, 1, stubProc.finishChangeInvoked)
+	require.Equal(t, 1, procMock.finishChangeInvoked)
 }
 
 func TestTraceHubServiceImpl_preDispatchSampleLimitFinishError(t *testing.T) {
@@ -497,7 +839,7 @@ func TestTraceHubServiceImpl_preDispatchSampleLimitFinishError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{finishErrSeq: []error{errors.New("sample limit error")}}
+	procMock := &stubProcessor{finishErrSeq: []error{errors.New("sample limit error")}}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -522,25 +864,25 @@ func TestTraceHubServiceImpl_preDispatchSampleLimitFinishError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          1404,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-30 * time.Minute),
 		RunEndAt:    now.Add(30 * time.Minute),
@@ -551,12 +893,11 @@ func TestTraceHubServiceImpl_preDispatchSampleLimitFinishError(t *testing.T) {
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil)
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "sample limit error")
-	require.Equal(t, 1, stubProc.finishChangeInvoked)
+	require.Equal(t, 1, procMock.finishChangeInvoked)
 }
 
 func TestTraceHubServiceImpl_preDispatchCycleTimeLimitFinishError(t *testing.T) {
@@ -564,7 +905,7 @@ func TestTraceHubServiceImpl_preDispatchCycleTimeLimitFinishError(t *testing.T) 
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{finishErrSeq: []error{errors.New("cycle time error")}}
+	procMock := &stubProcessor{finishErrSeq: []error{errors.New("cycle time error")}}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -589,25 +930,25 @@ func TestTraceHubServiceImpl_preDispatchCycleTimeLimitFinishError(t *testing.T) 
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          1707,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-2 * time.Hour),
 		RunEndAt:    now.Add(-time.Minute),
@@ -618,12 +959,11 @@ func TestTraceHubServiceImpl_preDispatchCycleTimeLimitFinishError(t *testing.T) 
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil)
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cycle time error")
-	require.Equal(t, 1, stubProc.finishChangeInvoked)
+	require.Equal(t, 1, procMock.finishChangeInvoked)
 }
 
 func TestTraceHubServiceImpl_preDispatchCycleCountFinishError(t *testing.T) {
@@ -631,7 +971,7 @@ func TestTraceHubServiceImpl_preDispatchCycleCountFinishError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{finishErrSeq: []error{errors.New("cycle count error")}}
+	procMock := &stubProcessor{finishErrSeq: []error{errors.New("cycle count error")}}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -656,25 +996,25 @@ func TestTraceHubServiceImpl_preDispatchCycleCountFinishError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          2009,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-30 * time.Minute),
 		RunEndAt:    now.Add(30 * time.Minute),
@@ -685,12 +1025,11 @@ func TestTraceHubServiceImpl_preDispatchCycleCountFinishError(t *testing.T) {
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(1), nil)
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cycle count error")
-	require.Equal(t, 1, stubProc.finishChangeInvoked)
+	require.Equal(t, 1, procMock.finishChangeInvoked)
 }
 
 func TestTraceHubServiceImpl_preDispatchCreativeError(t *testing.T) {
@@ -698,7 +1037,7 @@ func TestTraceHubServiceImpl_preDispatchCreativeError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{createTaskRunErrSeq: []error{errors.New("creative fail")}}
+	procMock := &stubProcessor{createTaskRunErrSeq: []error{errors.New("creative fail")}}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -719,27 +1058,32 @@ func TestTraceHubServiceImpl_preDispatchCreativeError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
+
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "creative fail")
-	require.Equal(t, 1, len(stubProc.createTaskRunReqs))
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
+}
+
+func toObservabilityTask(dto *task.Task) *entity.ObservabilityTask {
+	return taskconvertor.TaskDTO2DO(dto)
 }
 
 func TestTraceHubServiceImpl_preDispatchAggregatesErrors(t *testing.T) {
@@ -758,22 +1102,22 @@ func TestTraceHubServiceImpl_preDispatchAggregatesErrors(t *testing.T) {
 		CycleTimeUnit: &firstSamplerUnit,
 	}
 	firstSub := &spanSubscriber{
-		taskID: 11,
-		t: &task.Task{
-			ID:          ptr.Of(int64(11)),
-			WorkspaceID: ptr.Of(int64(21)),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
-			Rule: &task.Rule{
-				EffectiveTime: &task.EffectiveTime{StartAt: ptr.Of(firstStartAt), EndAt: ptr.Of(now.Add(time.Hour).UnixMilli())},
-				Sampler:       firstSampler,
-			},
-			BaseInfo: &common.BaseInfo{},
-		},
+		taskID:    11,
 		processor: firstProc,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	firstSub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(int64(11)),
+		WorkspaceID: ptr.Of(int64(21)),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule: &task.Rule{
+			EffectiveTime: &task.EffectiveTime{StartAt: ptr.Of(firstStartAt), EndAt: ptr.Of(now.Add(time.Hour).UnixMilli())},
+			Sampler:       firstSampler,
+		},
+		BaseInfo: &common.BaseInfo{},
+	})
 
 	secondStartAt := now.Add(-2 * time.Hour).UnixMilli()
 	secondEndAt := now.Add(-time.Minute).UnixMilli()
@@ -790,38 +1134,38 @@ func TestTraceHubServiceImpl_preDispatchAggregatesErrors(t *testing.T) {
 		ID:          101,
 		TaskID:      secondTaskID,
 		WorkspaceID: secondWorkspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-3 * time.Hour),
 		RunEndAt:    now.Add(-90 * time.Minute),
 	}
 	secondProc := &stubProcessor{finishErrSeq: []error{errors.New("second fail")}}
 	secondSub := &spanSubscriber{
-		taskID: secondTaskID,
-		t: &task.Task{
-			ID:          ptr.Of(secondTaskID),
-			WorkspaceID: ptr.Of(secondWorkspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule: &task.Rule{
-				EffectiveTime: &task.EffectiveTime{StartAt: ptr.Of(secondStartAt), EndAt: ptr.Of(secondEndAt)},
-				Sampler:       secondSampler,
-			},
-			BaseInfo: &common.BaseInfo{},
-		},
+		taskID:    secondTaskID,
 		processor: secondProc,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	secondSub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(secondTaskID),
+		WorkspaceID: ptr.Of(secondWorkspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule: &task.Rule{
+			EffectiveTime: &task.EffectiveTime{StartAt: ptr.Of(secondStartAt), EndAt: ptr.Of(secondEndAt)},
+			Sampler:       secondSampler,
+		},
+		BaseInfo: &common.BaseInfo{},
+	})
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), secondTaskID).Return(secondRun, nil)
-	mockRepo.EXPECT().GetTaskCount(gomock.Any(), secondTaskID).Return(int64(0), nil)
-	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), secondTaskID, secondRun.ID).Return(int64(0), nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), firstSub.taskID).Return(nil, nil).AnyTimes()
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), secondTaskID).Return(secondRun, nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskCount(gomock.Any(), secondTaskID).Return(int64(0), nil).AnyTimes()
+	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), secondTaskID, secondRun.ID).Return(int64(0), nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{firstSub, secondSub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{firstSub, secondSub})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "first fail")
 	require.Contains(t, err.Error(), "second fail")
@@ -834,7 +1178,7 @@ func TestTraceHubServiceImpl_preDispatchUpdateError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{updateErr: errors.New("update fail")}
+	procMock := &stubProcessor{updateErr: errors.New("update fail")}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -856,28 +1200,29 @@ func TestTraceHubServiceImpl_preDispatchUpdateError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusUnstarted),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
+
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.NoError(t, err)
-	require.Equal(t, 1, len(stubProc.createTaskRunReqs))
-	require.Equal(t, 1, stubProc.updateCallCount)
-	require.Zero(t, stubProc.finishChangeInvoked)
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
+	require.Equal(t, 1, procMock.updateCallCount)
+	require.Zero(t, procMock.finishChangeInvoked)
 }
 
 func TestTraceHubServiceImpl_preDispatchListTaskRunError(t *testing.T) {
@@ -885,7 +1230,7 @@ func TestTraceHubServiceImpl_preDispatchListTaskRunError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{}
+	procMock := &stubProcessor{}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -902,28 +1247,27 @@ func TestTraceHubServiceImpl_preDispatchListTaskRunError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, errors.New("repo fail"))
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.NoError(t, err)
-	require.Empty(t, stubProc.createTaskRunReqs)
+	require.Empty(t, procMock.createTaskRunReqs)
 }
 
 func TestTraceHubServiceImpl_preDispatchTaskRunConfigDay(t *testing.T) {
@@ -931,7 +1275,7 @@ func TestTraceHubServiceImpl_preDispatchTaskRunConfigDay(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{createTaskRunErrSeq: []error{errors.New("create fail")}}
+	procMock := &stubProcessor{createTaskRunErrSeq: []error{errors.New("create fail")}}
 
 	now := time.Now()
 	startAt := now.Add(-10 * time.Minute).UnixMilli()
@@ -952,31 +1296,30 @@ func TestTraceHubServiceImpl_preDispatchTaskRunConfigDay(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(nil, nil).AnyTimes()
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "create fail")
-	require.Equal(t, 1, len(stubProc.createTaskRunReqs))
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
 	delta := int64(2) * 24 * time.Hour.Milliseconds()
-	require.Equal(t, startAt+delta, stubProc.createTaskRunReqs[0].RunEndAt)
+	require.Equal(t, startAt+delta, procMock.createTaskRunReqs[0].RunEndAt)
 }
 
 func TestTraceHubServiceImpl_preDispatchCycleCreativeError(t *testing.T) {
@@ -984,7 +1327,7 @@ func TestTraceHubServiceImpl_preDispatchCycleCreativeError(t *testing.T) {
 	t.Cleanup(ctrl.Finish)
 
 	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
-	stubProc := &stubProcessor{createTaskRunErrSeq: []error{errors.New("cycle create fail")}}
+	procMock := &stubProcessor{createTaskRunErrSeq: []error{errors.New("cycle create fail")}}
 
 	now := time.Now()
 	startAt := now.Add(-time.Hour).UnixMilli()
@@ -1009,39 +1352,242 @@ func TestTraceHubServiceImpl_preDispatchCycleCreativeError(t *testing.T) {
 	}
 
 	sub := &spanSubscriber{
-		taskID: taskID,
-		t: &task.Task{
-			ID:          ptr.Of(taskID),
-			WorkspaceID: ptr.Of(workspaceID),
-			TaskType:    task.TaskTypeAutoEval,
-			TaskStatus:  ptr.Of(task.TaskStatusRunning),
-			Rule:        rule,
-			BaseInfo:    &common.BaseInfo{},
-		},
-		processor: stubProc,
+		taskID:    taskID,
+		processor: procMock,
 		taskRepo:  mockRepo,
-		runType:   task.TaskRunTypeNewData,
+		runType:   entity.TaskRunTypeNewData,
 	}
+	sub.t = toObservabilityTask(&task.Task{
+		ID:          ptr.Of(taskID),
+		WorkspaceID: ptr.Of(workspaceID),
+		TaskType:    task.TaskTypeAutoEval,
+		TaskStatus:  ptr.Of(task.TaskStatusRunning),
+		Rule:        rule,
+		BaseInfo:    &common.BaseInfo{},
+	})
 
 	taskRunConfig := &entity.TaskRun{
 		ID:          3102,
 		TaskID:      taskID,
 		WorkspaceID: workspaceID,
-		TaskType:    task.TaskRunTypeNewData,
+		TaskType:    entity.TaskRunTypeNewData,
 		RunStatus:   task.TaskStatusRunning,
 		RunStartAt:  now.Add(-2 * time.Hour),
 		RunEndAt:    now.Add(-time.Minute),
 	}
 
-	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil)
+	mockRepo.EXPECT().GetLatestNewDataTaskRun(gomock.Any(), gomock.AssignableToTypeOf(ptr.Of(int64(0))), taskID).Return(taskRunConfig, nil).AnyTimes()
 	mockRepo.EXPECT().GetTaskCount(gomock.Any(), taskID).Return(int64(0), nil)
 	mockRepo.EXPECT().GetTaskRunCount(gomock.Any(), taskID, taskRunConfig.ID).Return(int64(0), nil)
 
 	impl := &TraceHubServiceImpl{taskRepo: mockRepo}
-	span := &loop_span.Span{StartTime: now.UnixMilli(), TraceID: "trace", SpanID: "span"}
 
-	err := impl.preDispatch(context.Background(), span, []*spanSubscriber{sub})
+	err := impl.preDispatch(context.Background(), []*spanSubscriber{sub})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cycle create fail")
-	require.Equal(t, 1, len(stubProc.createTaskRunReqs))
+	require.Equal(t, 1, len(procMock.createTaskRunReqs))
+}
+
+func TestTraceHubServiceImpl_buildSubscriberOfSpan_Filtering(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockRepo := repo_mocks.NewMockITaskRepo(ctrl)
+	configLoader := config_mocks.NewMockITraceConfig(ctrl)
+
+	impl := &TraceHubServiceImpl{
+		taskRepo:      mockRepo,
+		config:        configLoader,
+		localCache:    NewLocalCache(),
+		taskProcessor: processor.NewTaskProcessor(),
+	}
+
+	// Setup local cache to pass the initial span filter
+	impl.localCache.taskCache.Store("ObjListWithTask", TaskCacheInfo{
+		WorkspaceIDs: []string{"space-1"},
+	})
+
+	baseSpan := &loop_span.Span{
+		TraceID:     "trace-1",
+		SpanID:      "span-1",
+		WorkspaceID: "space-1",
+		StartTime:   2000,
+	}
+
+	tests := []struct {
+		name        string
+		configSetup func()
+		taskSetup   func() *entity.ObservabilityTask
+		spanSetup   func() *loop_span.Span
+	}{
+		{
+			name: "Filter by SpaceList",
+			configSetup: func() {
+				configLoader.EXPECT().GetConsumerListening(gomock.Any()).Return(&componentconfig.ConsumerListening{
+					IsAllSpace: false,
+					SpaceList:  []int64{999},
+				}, nil)
+			},
+			taskSetup: func() *entity.ObservabilityTask {
+				return &entity.ObservabilityTask{
+					ID:            1,
+					WorkspaceID:   1,
+					TaskType:      entity.TaskTypeAutoEval,
+					EffectiveTime: &entity.EffectiveTime{StartAt: 1000},
+				}
+			},
+		},
+		{
+			name: "Filter by Nil EffectiveTime",
+			configSetup: func() {
+				configLoader.EXPECT().GetConsumerListening(gomock.Any()).Return(&componentconfig.ConsumerListening{
+					IsAllSpace: true,
+				}, nil)
+			},
+			taskSetup: func() *entity.ObservabilityTask {
+				return &entity.ObservabilityTask{
+					ID:            2,
+					WorkspaceID:   1,
+					TaskType:      entity.TaskTypeAutoEval,
+					EffectiveTime: nil,
+				}
+			},
+		},
+		{
+			name: "Filter by Zero StartAt",
+			configSetup: func() {
+				configLoader.EXPECT().GetConsumerListening(gomock.Any()).Return(&componentconfig.ConsumerListening{
+					IsAllSpace: true,
+				}, nil)
+			},
+			taskSetup: func() *entity.ObservabilityTask {
+				return &entity.ObservabilityTask{
+					ID:            3,
+					WorkspaceID:   1,
+					TaskType:      entity.TaskTypeAutoEval,
+					EffectiveTime: &entity.EffectiveTime{StartAt: 0},
+				}
+			},
+		},
+		{
+			name: "Filter by Pending Status",
+			configSetup: func() {
+				configLoader.EXPECT().GetConsumerListening(gomock.Any()).Return(&componentconfig.ConsumerListening{
+					IsAllSpace: true,
+				}, nil)
+			},
+			taskSetup: func() *entity.ObservabilityTask {
+				return &entity.ObservabilityTask{
+					ID:            4,
+					WorkspaceID:   1,
+					TaskType:      entity.TaskTypeAutoEval,
+					TaskStatus:    entity.TaskStatusPending,
+					EffectiveTime: &entity.EffectiveTime{StartAt: 1000},
+				}
+			},
+		},
+		{
+			name: "Filter by Span StartTime before Task StartAt",
+			configSetup: func() {
+				configLoader.EXPECT().GetConsumerListening(gomock.Any()).Return(&componentconfig.ConsumerListening{
+					IsAllSpace: true,
+				}, nil)
+			},
+			taskSetup: func() *entity.ObservabilityTask {
+				return &entity.ObservabilityTask{
+					ID:            5,
+					WorkspaceID:   1,
+					TaskType:      entity.TaskTypeAutoEval,
+					EffectiveTime: &entity.EffectiveTime{StartAt: 3000},
+				}
+			},
+			spanSetup: func() *loop_span.Span {
+				s := *baseSpan
+				s.StartTime = 2000
+				return &s
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.configSetup()
+			taskDO := tt.taskSetup()
+
+			mockRepo.EXPECT().ListNonFinalTaskBySpaceID(gomock.Any(), "space-1").Return([]int64{taskDO.ID}, nil)
+			mockRepo.EXPECT().GetTaskByCache(gomock.Any(), taskDO.ID).Return(taskDO, nil)
+
+			span := baseSpan
+			if tt.spanSetup != nil {
+				span = tt.spanSetup()
+			}
+
+			err := impl.SpanTrigger(context.Background(), span)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestTraceHubServiceImpl_withTaskRunCreateLock(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLocker := lock_mocks.NewMockILocker(ctrl)
+	impl := &TraceHubServiceImpl{
+		locker: mockLocker,
+	}
+
+	ctx := context.Background()
+	taskID := int64(1001)
+	runType := entity.TaskRunTypeNewData
+	runStartAt := int64(2000)
+	runEndAt := int64(3000)
+
+	t.Run("Lock error", func(t *testing.T) {
+		mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, errors.New("redis error"))
+
+		err := impl.withTaskRunCreateLock(ctx, taskID, runType, runStartAt, runEndAt, func() error {
+			return nil
+		})
+		require.ErrorContains(t, err, "redis error")
+	})
+
+	t.Run("Not locked", func(t *testing.T) {
+		mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+
+		called := false
+		err := impl.withTaskRunCreateLock(ctx, taskID, runType, runStartAt, runEndAt, func() error {
+			called = true
+			return nil
+		})
+		require.NoError(t, err)
+		require.False(t, called)
+	})
+
+	t.Run("Lock success", func(t *testing.T) {
+		mockLocker.EXPECT().Lock(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+		mockLocker.EXPECT().Unlock(gomock.Any()).Return(true, nil)
+
+		called := false
+		err := impl.withTaskRunCreateLock(ctx, taskID, runType, runStartAt, runEndAt, func() error {
+			called = true
+			return nil
+		})
+		require.NoError(t, err)
+		require.True(t, called)
+	})
+
+	t.Run("Locker nil", func(t *testing.T) {
+		nilLockerImpl := &TraceHubServiceImpl{locker: nil}
+		called := false
+		err := nilLockerImpl.withTaskRunCreateLock(ctx, taskID, runType, runStartAt, runEndAt, func() error {
+			called = true
+			return nil
+		})
+		require.NoError(t, err)
+		require.True(t, called)
+	})
 }

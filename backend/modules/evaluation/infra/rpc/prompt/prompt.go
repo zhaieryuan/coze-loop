@@ -59,7 +59,7 @@ func (p PromptRPCAdapter) ExecutePrompt(ctx context.Context, spaceID int64, para
 		if runtimeParam != nil && runtimeParam.ModelConfig != nil {
 			req.OverridePromptParams = &prompt.OverridePromptParams{
 				ModelConfig: &prompt.ModelConfig{
-					ModelID:     gptr.Of(runtimeParam.ModelConfig.ModelID),
+					ModelID:     runtimeParam.ModelConfig.ModelID,
 					MaxTokens:   runtimeParam.ModelConfig.MaxTokens,
 					Temperature: runtimeParam.ModelConfig.Temperature,
 					TopP:        runtimeParam.ModelConfig.TopP,
@@ -72,7 +72,6 @@ func (p PromptRPCAdapter) ExecutePrompt(ctx context.Context, spaceID int64, para
 	if err != nil {
 		return nil, err
 	}
-
 	if resp == nil {
 		return nil, errorx.NewByCode(errno.CommonRPCErrorCode)
 	}
@@ -96,6 +95,9 @@ func (p PromptRPCAdapter) ExecutePrompt(ctx context.Context, spaceID int64, para
 
 func (p PromptRPCAdapter) convMsgToContent(msg *prompt.Message) *entity.Content {
 	if len(msg.GetParts()) == 0 {
+		if len(gptr.Indirect(msg.Content)) == 0 {
+			return nil
+		}
 		return &entity.Content{
 			ContentType: gptr.Of(entity.ContentTypeText),
 			Text:        msg.Content,

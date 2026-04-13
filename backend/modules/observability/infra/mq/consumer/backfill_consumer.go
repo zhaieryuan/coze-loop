@@ -12,6 +12,7 @@ import (
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
+	"github.com/coze-dev/coze-loop/backend/pkg/consts"
 	"github.com/coze-dev/coze-loop/backend/pkg/json"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/conv"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
@@ -22,7 +23,7 @@ type BackFillConsumer struct {
 	conf.IConfigLoader
 }
 
-func newBackFillConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
+func NewBackFillConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
 	return &BackFillConsumer{
 		handler:       handler,
 		IConfigLoader: loader,
@@ -50,6 +51,7 @@ func (e *BackFillConsumer) ConsumerCfg(ctx context.Context) (*mq.ConsumerConfig,
 }
 
 func (e *BackFillConsumer) HandleMessage(ctx context.Context, ext *mq.MessageExt) error {
+	ctx = context.WithValue(ctx, consts.CtxKeyFlowMethodKey, "backfill_consumer")
 	logID := logs.NewLogID()
 	ctx = logs.SetLogID(ctx, logID)
 	event := new(entity.BackFillEvent)

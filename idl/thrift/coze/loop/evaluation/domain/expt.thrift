@@ -5,6 +5,7 @@ include "eval_target.thrift"
 include "evaluator.thrift"
 include "eval_set.thrift"
 include "../../data/domain/tag.thrift"
+include "../../data/domain/dataset.thrift"
 
 enum ExptStatus {
     Unknown = 0
@@ -61,6 +62,66 @@ struct Experiment {
     41: optional i64 max_alive_time
     42: optional SourceType source_type
     43: optional string source_id
+    45: optional i32 item_retry_num
+
+    51: optional list<evaluator.EvaluatorIDVersionItem> evaluator_id_version_list // 补充的评估器id+version关联评估器方式，和evaluator_version_ids共同使用，兼容老逻辑
+
+    60: optional ExptTemplateMeta expt_template_meta
+    // 评估器得分加权配置
+    61: optional ExptScoreWeight score_weight_config
+    62: optional bool enable_weighted_score
+}
+
+// 实验模板基础信息
+struct ExptTemplateMeta {
+    1: optional i64 id (api.js_conv='true', go.tag='json:"id"')
+    2: optional i64 workspace_id (api.js_conv='true', go.tag='json:"workspace_id"')
+    3: optional string name
+    4: optional string desc
+    5: optional ExptType expt_type   // 模板对应的实验类型，当前主要为 Offline
+}
+
+// 实验三元组配置
+struct ExptTuple {
+    1: optional i64 eval_set_id (api.js_conv='true', go.tag='json:"eval_set_id"')
+    2: optional i64 eval_set_version_id (api.js_conv='true', go.tag='json:"eval_set_version_id"')
+    3: optional i64 target_id (api.js_conv='true', go.tag='json:"target_id"')
+    4: optional i64 target_version_id (api.js_conv='true', go.tag='json:"target_version_id"')
+    6: optional list<evaluator.EvaluatorIDVersionItem> evaluator_id_version_items
+    7: optional eval_set.EvaluationSet eval_set
+    8: optional eval_target.EvalTarget eval_target
+    9: optional list<evaluator.Evaluator> evaluators
+}
+
+// 实验字段映射和运行时参数配置
+struct ExptFieldMapping {
+    1: optional TargetFieldMapping target_field_mapping
+    2: optional list<EvaluatorFieldMapping> evaluator_field_mapping
+    3: optional common.RuntimeParam target_runtime_param
+    4: optional i32 item_concur_num
+    5: optional i32 item_retry_num
+}
+
+// 实验评估器得分加权配置
+struct ExptScoreWeight {
+    1: optional bool enable_weighted_score
+    2: optional map<i64, double> evaluator_score_weights
+}
+
+struct ExptTemplate {
+    1: optional ExptTemplateMeta meta
+    2: optional ExptTuple triple_config
+    3: optional ExptFieldMapping field_mapping_config
+    4: optional ExptScoreWeight score_weight_config
+    5: optional ExptInfo expt_info
+
+    255: optional common.BaseInfo base_info
+}
+
+struct ExptInfo {
+    1: optional i64 created_expt_count
+    2: optional i64 latest_expt_id (api.js_conv='true', go.tag='json:"latest_expt_id"')
+    3: optional ExptStatus latest_expt_status
 }
 
 struct TokenUsage {
@@ -94,6 +155,7 @@ struct EvaluatorFieldMapping {
     1: required i64 evaluator_version_id (api.js_conv='true', go.tag='json:"evaluator_version_id"')
     2: optional list<FieldMapping> from_eval_set
     3: optional list<FieldMapping> from_target
+    4: optional evaluator.EvaluatorIDVersionItem evaluator_id_version_item
 }
 
 struct FieldMapping {
@@ -149,6 +211,28 @@ struct ColumnEvaluator {
     4: optional string name
     5: optional string version
     6: optional string description
+    7: optional bool builtin
+}
+
+struct ExptColumnEvalTarget {
+    1: optional i64 experiment_id (api.js_conv='true', go.tag='json:"experiment_id"')
+    2: optional list<ColumnEvalTarget> column_eval_targets
+}
+
+const string ColumnEvalTargetName_ActualOutput = "actual_output"
+const string ColumnEvalTargetName_Trajectory = "trajectory"
+const string ColumnEvalTargetName_EvalTargetTotalLatency = "eval_target_total_latency"
+const string ColumnEvalTargetName_EvaluatorInputTokens = "eval_target_input_tokens"
+const string ColumnEvalTargetName_EvaluatorOutputTokens = "eval_target_output_tokens"
+const string ColumnEvalTargetName_EvaluatorTotalTokens = "eval_target_total_tokens"
+
+struct ColumnEvalTarget {
+    1: optional string name
+    2: optional string description
+    3: optional string label
+    4: optional common.ContentType content_type
+    5: optional string text_schema
+    6: optional dataset.SchemaKey schema_key
 }
 
 struct ColumnEvalSetField {
@@ -158,6 +242,7 @@ struct ColumnEvalSetField {
     4: optional common.ContentType content_type
 //    5: optional datasetv3.FieldDisplayFormat DefaultDisplayFormat
     6: optional string text_schema
+    7: optional dataset.SchemaKey schema_key
 }
 
 struct ItemResult {
@@ -166,6 +251,8 @@ struct ItemResult {
     2: optional list<TurnResult> turn_results
     3: optional ItemSystemInfo system_info
     4: optional i64 item_index (api.js_conv='true', go.tag='json:"item_index"')
+
+    5: optional map<string, string> ext
 }
 
 // 行级结果 可能包含多个实验
@@ -203,6 +290,8 @@ struct TurnTargetOutput {
 
 struct TurnEvaluatorOutput {
     1: map<i64, evaluator.EvaluatorRecord> evaluator_records (go.tag = 'json:"evaluator_records"')
+
+    11: optional double weighted_score (go.tag = 'json:"weighted_score"') // 加权汇总得分
 }
 
 struct TurnAnnotateResult {
@@ -233,6 +322,13 @@ struct ExperimentTurnPayload {
     5: optional TurnSystemInfo system_info
     // 人工标注结果结果
     6: optional TurnAnnotateResult annotate_result
+    // 轨迹分析结果
+    7: optional TrajectoryAnalysisResult trajectory_analysis_result
+}
+
+struct TrajectoryAnalysisResult {
+    1: optional i64 record_id (api.js_conv = 'true', go.tag = 'json:"record_id"')
+    2: optional InsightAnalysisStatus Status
 }
 
 struct KeywordSearch {
@@ -241,6 +337,12 @@ struct KeywordSearch {
 }
 
 struct ExperimentFilter {
+    1: optional Filters filters
+    2: optional KeywordSearch keyword_search
+}
+
+// 实验模板筛选器，字段设计复用实验的 Filters / KeywordSearch 能力
+struct ExperimentTemplateFilter {
     1: optional Filters filters
     2: optional KeywordSearch keyword_search
 }
@@ -292,6 +394,15 @@ enum FieldType {
     AnnotationScore = 49 // 使用二级key, field_key为tag_key_id, value为score
     AnnotationText = 50 // 使用二级key, field_key为tag_key_id, value为文本
     AnnotationCategorical = 51  // 使用二级key, field_key为tag_key_id, value为tag_value_id
+
+    TotalLatency = 60 // 目前使用固定key：total_latency
+    InputTokens = 61 // 目前使用固定key：input_tokens
+    OutputTokens = 62 // 目前使用固定key：output_tokens
+    TotalTokens = 63 // 目前使用固定key：total_tokens
+
+    ExperimentTemplateID = 70
+    EvaluatorWeightedScore = 71
+    UpdatedBy = 72
 }
 
 // 字段过滤器
@@ -339,6 +450,20 @@ struct ExptAggregateResult {
     2: optional map<i64, EvaluatorAggregateResult> evaluator_results (go.tag = 'json:"evaluator_results"')
     3: optional ExptAggregateCalculateStatus status
     4: optional map<i64, AnnotationAggregateResult> annotation_results (go.tag = 'json:"annotation_results"')    // tag_key_id -> result
+    5: optional EvalTargetAggregateResult eval_target_aggr_result
+    6: optional i64 update_time // timestamp in seconds
+
+    10: optional list<AggregatorResult> weighted_results (go.tag = 'json:"weighted_results"')
+}
+
+struct EvalTargetAggregateResult {
+    1: optional i64 target_id (api.js_conv = 'true', go.tag = 'json:"target_id"')
+    2: optional i64 target_version_id (api.js_conv = 'true', go.tag = 'json:"target_version_id"')
+
+    5: optional list<AggregatorResult> latency
+    6: optional list<AggregatorResult> input_tokens
+    7: optional list<AggregatorResult> output_tokens
+    8: optional list<AggregatorResult> total_tokens
 }
 
 // 评估器版本粒度聚合结果
@@ -446,9 +571,11 @@ struct ExptResultExportRecord {
     5: optional common.BaseInfo base_info
     6: optional i64 start_time (api.js_conv='true', go.tag='json:"start_time"')
     7: optional i64 end_time (api.js_conv='true', go.tag='json:"end_time"')
+    // deprecated, cause not match snake name
     8: optional string URL
     9: optional bool expired
     10: optional RunError error
+    11: optional string url
 }
 
 // 分析任务状态
@@ -479,6 +606,13 @@ struct ExptInsightAnalysisRecord {
     6: optional string analysis_report_content
     7: optional ExptInsightAnalysisFeedback expt_insight_analysis_feedback
     8: optional common.BaseInfo base_info
+
+    21: optional list<ExptInsightAnalysisIndex> analysis_report_index
+}
+
+struct ExptInsightAnalysisIndex {
+    1: optional string id
+    2: optional string title
 }
 
 // 洞察分析反馈统计
@@ -497,6 +631,11 @@ struct ExptInsightAnalysisFeedbackComment {
     4: required i64 record_id (api.js_conv='true', go.tag='json:"record_id"')
     5: required string content
     6: optional common.BaseInfo base_info
+}
+
+struct ExptInsightAnalysisFeedbackVote {
+    1: optional i64 id (api.js_conv='true', go.tag='json:"comment_id"')
+    2: optional FeedbackActionType feedback_action_type
 }
 
 // 反馈动作

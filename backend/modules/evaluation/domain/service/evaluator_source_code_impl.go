@@ -1,5 +1,6 @@
 // Copyright (c) 2025 coze-dev Authors
-// SPDX-License-Identifier: Apache-2.0	return errorx.NewByCode(errno.RequiredFunctionNotFoundCode, errorx.WithExtraMsg("代码中必须定义 exec_evaluation 或 execEvaluation 函数。JavaScript 函数定义格式：function execEvaluation(turn, userInput, modelOutput, modelConfig, evaluatorConfig) { ... } 或 function exec_evaluation(turn, user_input, model_output, model_config, evaluator_config) { ... }"))
+// SPDX-License-Identifier: Apache-2.0
+
 package service
 
 import (
@@ -199,12 +200,13 @@ func (c *EvaluatorSourceCodeServiceImpl) EvaluatorType() entity.EvaluatorType {
 }
 
 // Run 执行Code评估器
-func (c *EvaluatorSourceCodeServiceImpl) Run(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData, disableTracing bool) (output *entity.EvaluatorOutputData, runStatus entity.EvaluatorRunStatus, traceID string) {
+func (c *EvaluatorSourceCodeServiceImpl) Run(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData, evaluatorRunConf *entity.EvaluatorRunConfig, exptSpaceID int64, disableTracing bool) (output *entity.EvaluatorOutputData, runStatus entity.EvaluatorRunStatus, traceID string) {
+	logs.CtxInfo(ctx, "[Run] Run Code Evaluator input: %v", input)
 	var err error
 	var code string
 	startTime := time.Now()
 	// 创建trace span
-	rootSpan, ctx := c.newEvaluatorSpan(ctx, evaluator.Name, "LoopEvaluation", strconv.FormatInt(evaluator.SpaceID, 10), disableTracing)
+	rootSpan, ctx := c.newEvaluatorSpan(ctx, evaluator.Name, "LoopEvaluation", strconv.FormatInt(exptSpaceID, 10), disableTracing)
 	traceID = rootSpan.GetTraceID()
 
 	defer func() {
@@ -218,23 +220,24 @@ func (c *EvaluatorSourceCodeServiceImpl) Run(ctx context.Context, evaluator *ent
 	// 1. 验证评估器
 	if err = c.validateEvaluator(evaluator, startTime); err != nil {
 		output, runStatus = c.createErrorOutput(err, errno.InvalidEvaluatorTypeCode, "invalid evaluator type or code evaluator version is nil", startTime)
-		return
+		return output, runStatus, traceID
 	}
 
 	// 2. 准备代码执行环境
 	code, result, err := c.prepareAndExecuteCode(ctx, evaluator, input, startTime)
 	if err != nil {
 		output, runStatus = c.createErrorOutputFromError(err, startTime)
-		return
+		return output, runStatus, traceID
 	}
 
 	// 3. 处理执行结果
 	output, runStatus, err = c.processCodeExecutionResult(result, startTime)
-	return
+	return output, runStatus, traceID
 }
 
 // handleRunDefer 处理Run方法的defer逻辑
 func (c *EvaluatorSourceCodeServiceImpl) handleRunDefer(ctx context.Context, rootSpan *codeEvaluatorSpan, output **entity.EvaluatorOutputData, errInfo *error, input *entity.EvaluatorInputData, evaluator *entity.Evaluator, code string, runStatus entity.EvaluatorRunStatus) {
+	logs.CtxInfo(ctx, "[handleRunDefer] Run Code Evaluator input: %v", input)
 	if *output == nil {
 		*output = &entity.EvaluatorOutputData{
 			EvaluatorRunError: &entity.EvaluatorRunError{},
@@ -281,6 +284,9 @@ func (c *EvaluatorSourceCodeServiceImpl) validateEvaluator(evaluator *entity.Eva
 
 // prepareAndExecuteCode 准备并执行代码
 func (c *EvaluatorSourceCodeServiceImpl) prepareAndExecuteCode(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData, startTime time.Time) (string, *entity.ExecutionResult, error) {
+	if input == nil {
+		return "", nil, errorx.NewByCode(errno.InvalidInputDataCode, errorx.WithExtraMsg("input data is nil"))
+	}
 	codeVersion := evaluator.CodeEvaluatorVersion
 
 	// 1. 获取代码构建器
@@ -457,10 +463,18 @@ func (c *EvaluatorSourceCodeServiceImpl) createErrorOutputFromError(err error, s
 	}, entity.EvaluatorRunStatusFail
 }
 
+func (c *EvaluatorSourceCodeServiceImpl) AsyncRun(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData, evaluatorRunConf *entity.EvaluatorRunConfig, exptSpaceID int64, invokeID int64) (map[string]string, string, error) {
+	return nil, "", errorx.NewByCode(errno.InvalidEvaluatorTypeCode, errorx.WithExtraMsg("code evaluator does not support async run"))
+}
+
+func (c *EvaluatorSourceCodeServiceImpl) AsyncDebug(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData, evaluatorRunConf *entity.EvaluatorRunConfig, exptSpaceID int64, invokeID int64) (map[string]string, string, error) {
+	return nil, "", errorx.NewByCode(errno.InvalidEvaluatorTypeCode, errorx.WithExtraMsg("code evaluator does not support async debug"))
+}
+
 // Debug 调试Code评估器
-func (c *EvaluatorSourceCodeServiceImpl) Debug(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData) (output *entity.EvaluatorOutputData, err error) {
+func (c *EvaluatorSourceCodeServiceImpl) Debug(ctx context.Context, evaluator *entity.Evaluator, input *entity.EvaluatorInputData, evaluatorRunConf *entity.EvaluatorRunConfig, exptSpaceID int64) (output *entity.EvaluatorOutputData, err error) {
 	// 调试模式下直接调用Run方法
-	output, runStatus, _ := c.Run(ctx, evaluator, input, true)
+	output, runStatus, _ := c.Run(ctx, evaluator, input, evaluatorRunConf, exptSpaceID, true)
 	if runStatus == entity.EvaluatorRunStatusFail {
 		if output.EvaluatorRunError != nil {
 			return output, errorx.NewByCode(errno.CodeExecutionFailedCode, errorx.WithExtraMsg(output.EvaluatorRunError.Message))
@@ -1004,7 +1018,7 @@ const userCode = %s;
 try {
     // 使用Function构造函数进行语法检查
     new Function(userCode);
-    
+
     // 语法正确，输出JSON结果
     const result = {"valid": true, "error": null};
     console.log(JSON.stringify(result));
@@ -1366,7 +1380,7 @@ func (e *codeEvaluatorSpan) reportCodeRootSpan(ctx context.Context, request *Rep
 		e.SetStatusCode(ctx, 0)
 	case entity.EvaluatorRunStatusFail:
 		e.SetStatusCode(ctx, int(entity.EvaluatorRunStatusFail))
-		e.SetError(ctx, request.errInfo)
+		e.SetError(ctx, tracer.SanitizeErrorForTrace(request.errInfo))
 	default:
 		e.SetStatusCode(ctx, 0) // 默认为成功
 	}

@@ -10,8 +10,6 @@ import (
 	"context"
 
 	"github.com/cloudwego/kitex/pkg/endpoint"
-	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/experimentservice"
-	task_processor "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/processor"
 	"github.com/google/wire"
 
 	"github.com/coze-dev/coze-loop/backend/infra/ck"
@@ -29,10 +27,12 @@ import (
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/data/tag/tagservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/evaluationsetservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/evaluatorservice"
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/experimentservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/foundation/auth/authservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/foundation/file/fileservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/foundation/user/userservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/llm/runtime/llmruntimeservice"
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/observabilitytraceservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/prompt/promptmanageservice"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/foundation/loauth"
 	dataapp "github.com/coze-dev/coze-loop/backend/modules/data/application"
@@ -41,9 +41,12 @@ import (
 	evaluationapp "github.com/coze-dev/coze-loop/backend/modules/evaluation/application"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/infra/rpc/data"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/infra/rpc/prompt"
+	"github.com/coze-dev/coze-loop/backend/modules/evaluation/infra/rpc/trajectory"
 	foundationapp "github.com/coze-dev/coze-loop/backend/modules/foundation/application"
 	llmapp "github.com/coze-dev/coze-loop/backend/modules/llm/application"
 	obapp "github.com/coze-dev/coze-loop/backend/modules/observability/application"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/storage"
+	task_processor "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/processor"
 	promptapp "github.com/coze-dev/coze-loop/backend/modules/prompt/application"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
 )
@@ -69,6 +72,7 @@ var (
 	promptSet = wire.NewSet(
 		NewPromptHandler,
 		promptapp.InitPromptManageApplication,
+		promptapp.InitToolManageApplication,
 		promptapp.InitPromptDebugApplication,
 		promptapp.InitPromptExecuteApplication,
 		promptapp.InitPromptOpenAPIApplication,
@@ -77,6 +81,7 @@ var (
 		NewEvaluationHandler,
 		data.NewDatasetRPCAdapter,
 		prompt.NewPromptRPCAdapter,
+		trajectory.TrajectoryRPCSet,
 		evaluationapp.InitExperimentApplication,
 		evaluationapp.InitEvaluatorApplication,
 		evaluationapp.InitEvaluationSetApplication,
@@ -169,6 +174,9 @@ func InitEvaluationHandler(
 	fileClient fileservice.Client,
 	tagClient tagservice.Client,
 	objectStorage fileserver.ObjectStorage,
+	batchObjectStorage fileserver.BatchObjectStorage,
+	plainLimiterFactory limiter.IPlainRateLimiterFactory,
+	tracerFactory func() observabilitytraceservice.Client,
 ) (*EvaluationHandler, error) {
 	wire.Build(
 		evaluationSet,
@@ -213,6 +221,8 @@ func InitObservabilityHandler(
 	limiterFactory limiter.IRateLimiterFactory,
 	datasetClient datasetservice.Client,
 	redis redis.Cmdable,
+	persistentCmdable redis.PersistentCmdable,
+	storageProvider storage.IStorageProvider,
 	experimentClient experimentservice.Client,
 	taskProcessor task_processor.TaskProcessor,
 	aid int32,

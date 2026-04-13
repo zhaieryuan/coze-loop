@@ -20,6 +20,7 @@ type SystemView struct {
 
 type PlatformTenantsCfg struct {
 	Config map[string][]string `mapstructure:"config" json:"config"`
+	Table  string              `mapstructure:"table" json:"table"`
 }
 
 type SpanTransHandlerConfig struct {
@@ -112,6 +113,16 @@ type ConsumerListening struct {
 	SpaceList  []int64  `json:"space_list"`
 }
 
+type MetricQueryConfig struct {
+	SupportOffline       bool                    `mapstructure:"support_offline" json:"support_offline"`
+	OfflineCriticalPoint int                     `mapstructure:"offline_critical_point" json:"offline_critical_point"`
+	SpaceConfigs         map[string]*SpaceConfig `mapstructure:"space_configs" json:"space_configs"`
+}
+
+type SpaceConfig struct {
+	DisableQuery bool `mapstructure:"disable_query" json:"disable_query"`
+}
+
 //go:generate mockgen -destination=mocks/config.go -package=mocks . ITraceConfig
 type ITraceConfig interface {
 	GetSystemViews(ctx context.Context) ([]*SystemView, error)
@@ -128,6 +139,10 @@ type ITraceConfig interface {
 	GetQueryMaxQPS(ctx context.Context, key string) (int, error)
 	GetKeySpanTypes(ctx context.Context) map[string][]string
 	GetBackfillMqProducerCfg(ctx context.Context) (*MqProducerCfg, error)
+	GetConsumerListening(ctx context.Context) (*ConsumerListening, error)
+	GetSpanWithAnnotationMqProducerCfg(ctx context.Context) (*MqProducerCfg, error)
+	GetMetricPlatformTenants(ctx context.Context) (*PlatformTenantsCfg, error)
+	GetMetricQueryConfig(ctx context.Context) *MetricQueryConfig
 
 	conf.IConfigLoader
 }

@@ -12,6 +12,7 @@ import (
 // Client is designed to provide IDL-compatible methods with call-option parameter for kitex framework.
 type Client interface {
 	ListSpans(ctx context.Context, req *trace.ListSpansRequest, callOptions ...callopt.Option) (r *trace.ListSpansResponse, err error)
+	ListPreSpan(ctx context.Context, req *trace.ListPreSpanRequest, callOptions ...callopt.Option) (r *trace.ListPreSpanResponse, err error)
 	GetTrace(ctx context.Context, req *trace.GetTraceRequest, callOptions ...callopt.Option) (r *trace.GetTraceResponse, err error)
 	SearchTraceTree(ctx context.Context, req *trace.SearchTraceTreeRequest, callOptions ...callopt.Option) (r *trace.SearchTraceTreeResponse, err error)
 	BatchGetTracesAdvanceInfo(ctx context.Context, req *trace.BatchGetTracesAdvanceInfoRequest, callOptions ...callopt.Option) (r *trace.BatchGetTracesAdvanceInfoResponse, err error)
@@ -30,6 +31,9 @@ type Client interface {
 	ChangeEvaluatorScore(ctx context.Context, req *trace.ChangeEvaluatorScoreRequest, callOptions ...callopt.Option) (r *trace.ChangeEvaluatorScoreResponse, err error)
 	ListAnnotationEvaluators(ctx context.Context, req *trace.ListAnnotationEvaluatorsRequest, callOptions ...callopt.Option) (r *trace.ListAnnotationEvaluatorsResponse, err error)
 	ExtractSpanInfo(ctx context.Context, req *trace.ExtractSpanInfoRequest, callOptions ...callopt.Option) (r *trace.ExtractSpanInfoResponse, err error)
+	UpsertTrajectoryConfig(ctx context.Context, req *trace.UpsertTrajectoryConfigRequest, callOptions ...callopt.Option) (r *trace.UpsertTrajectoryConfigResponse, err error)
+	GetTrajectoryConfig(ctx context.Context, req *trace.GetTrajectoryConfigRequest, callOptions ...callopt.Option) (r *trace.GetTrajectoryConfigResponse, err error)
+	ListTrajectory(ctx context.Context, req *trace.ListTrajectoryRequest, callOptions ...callopt.Option) (r *trace.ListTrajectoryResponse, err error)
 }
 
 // NewClient creates a client for the service defined in IDL.
@@ -64,6 +68,11 @@ type kObservabilityTraceServiceClient struct {
 func (p *kObservabilityTraceServiceClient) ListSpans(ctx context.Context, req *trace.ListSpansRequest, callOptions ...callopt.Option) (r *trace.ListSpansResponse, err error) {
 	ctx = client.NewCtxWithCallOptions(ctx, callOptions)
 	return p.kClient.ListSpans(ctx, req)
+}
+
+func (p *kObservabilityTraceServiceClient) ListPreSpan(ctx context.Context, req *trace.ListPreSpanRequest, callOptions ...callopt.Option) (r *trace.ListPreSpanResponse, err error) {
+	ctx = client.NewCtxWithCallOptions(ctx, callOptions)
+	return p.kClient.ListPreSpan(ctx, req)
 }
 
 func (p *kObservabilityTraceServiceClient) GetTrace(ctx context.Context, req *trace.GetTraceRequest, callOptions ...callopt.Option) (r *trace.GetTraceResponse, err error) {
@@ -154,4 +163,19 @@ func (p *kObservabilityTraceServiceClient) ListAnnotationEvaluators(ctx context.
 func (p *kObservabilityTraceServiceClient) ExtractSpanInfo(ctx context.Context, req *trace.ExtractSpanInfoRequest, callOptions ...callopt.Option) (r *trace.ExtractSpanInfoResponse, err error) {
 	ctx = client.NewCtxWithCallOptions(ctx, callOptions)
 	return p.kClient.ExtractSpanInfo(ctx, req)
+}
+
+func (p *kObservabilityTraceServiceClient) UpsertTrajectoryConfig(ctx context.Context, req *trace.UpsertTrajectoryConfigRequest, callOptions ...callopt.Option) (r *trace.UpsertTrajectoryConfigResponse, err error) {
+	ctx = client.NewCtxWithCallOptions(ctx, callOptions)
+	return p.kClient.UpsertTrajectoryConfig(ctx, req)
+}
+
+func (p *kObservabilityTraceServiceClient) GetTrajectoryConfig(ctx context.Context, req *trace.GetTrajectoryConfigRequest, callOptions ...callopt.Option) (r *trace.GetTrajectoryConfigResponse, err error) {
+	ctx = client.NewCtxWithCallOptions(ctx, callOptions)
+	return p.kClient.GetTrajectoryConfig(ctx, req)
+}
+
+func (p *kObservabilityTraceServiceClient) ListTrajectory(ctx context.Context, req *trace.ListTrajectoryRequest, callOptions ...callopt.Option) (r *trace.ListTrajectoryResponse, err error) {
+	ctx = client.NewCtxWithCallOptions(ctx, callOptions)
+	return p.kClient.ListTrajectory(ctx, req)
 }

@@ -19,6 +19,8 @@ import (
 type ExptRunMode int32
 
 const (
+	EvaluationModeUnknown ExptRunMode = 0
+
 	// EvaluationModeSubmit 创建后提交
 	EvaluationModeSubmit ExptRunMode = 1
 
@@ -27,6 +29,9 @@ const (
 
 	// EvaluationModeAppend 追加模式
 	EvaluationModeAppend ExptRunMode = 3
+
+	EvaluationModeRetryAll   ExptRunMode = 4
+	EvaluationModeRetryItems ExptRunMode = 5
 )
 
 type ItemRunState int64
@@ -93,7 +98,7 @@ const (
 
 const (
 	defaultDaemonInterval        = 20 * time.Second
-	defaultZombieIntervalSecond  = 60 * 60 * 24
+	defaultZombieIntervalSecond  = 60 * 60 * 36
 	defaultItemEvalConcurNum     = 3
 	defaultItemEvalInterval      = 20 * time.Second
 	defaultSpaceExptConcurLimit  = 200
@@ -107,6 +112,8 @@ type ExptConsumerConf struct {
 
 	ExptExecConf      *ExptExecConf           `json:"expt_exec_conf" mapstructure:"expt_exec_conf"`
 	SpaceExptExecConf map[int64]*ExptExecConf `json:"space_expt_exec_conf" mapstructure:"space_expt_exec_conf"`
+
+	SchedulerAbortCtrl *SchedulerAbortCtrl `json:"scheduler_abort_ctrl" mapstructure:"scheduler_abort_ctrl"`
 }
 
 func (e *ExptConsumerConf) GetExptExecConf(spaceID int64) *ExptExecConf {
@@ -117,6 +124,53 @@ func (e *ExptConsumerConf) GetExptExecConf(spaceID int64) *ExptExecConf {
 		return e.SpaceExptExecConf[spaceID]
 	}
 	return e.ExptExecConf
+}
+
+func (e *ExptConsumerConf) GetSchedulerAbortCtrl() *SchedulerAbortCtrl {
+	if e != nil && e.SchedulerAbortCtrl != nil {
+		return e.SchedulerAbortCtrl
+	}
+	return nil
+}
+
+type SchedulerAbortCtrl struct {
+	UserExptTypeCtrl  map[string][]ExptType `json:"user_expt_type_ctrl" mapstructure:"user_expt_type_ctrl"`
+	SpaceExptTypeCtrl map[int64][]ExptType  `json:"space_expt_type_ctrl" mapstructure:"space_expt_type_ctrl"`
+	ExptIDCtrl        map[int64]bool        `json:"expt_id_ctrl" mapstructure:"expt_id_ctrl"`
+}
+
+func (s *SchedulerAbortCtrl) Abort(spaceID, exptID int64, userID string, exptType ExptType) bool {
+	if s == nil {
+		return false
+	}
+
+	if s.ExptIDCtrl != nil {
+		if abort, exists := s.ExptIDCtrl[exptID]; exists && abort {
+			return true
+		}
+	}
+
+	if s.SpaceExptTypeCtrl != nil {
+		if exptTypes, exists := s.SpaceExptTypeCtrl[spaceID]; exists {
+			for _, et := range exptTypes {
+				if et == exptType {
+					return true
+				}
+			}
+		}
+	}
+
+	if s.UserExptTypeCtrl != nil {
+		if exptTypes, exists := s.UserExptTypeCtrl[userID]; exists {
+			for _, et := range exptTypes {
+				if et == exptType {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 type ExptExecConf struct {
@@ -349,14 +403,15 @@ func (e *ExptItemEvalCtx) GetRecordEvalLogID(ctx context.Context) (logID string)
 func (e *ExptItemEvalCtx) GetTurnEvalLogID(ctx context.Context, turnID int64) (logID string) {
 	turnRunLog := e.GetExistTurnResultRunLog(turnID)
 
-	defer func() {
-		logs.CtxInfo(ctx, "GetTurnEvalLogID with log_id: %v", logID)
-	}()
+	defer func() { logs.CtxInfo(ctx, "GetTurnEvalLogID with log_id: %v", logID) }()
 
-	if turnRunLog == nil || len(turnRunLog.LogID) == 0 {
+	if turnRunLog == nil {
 		return logs.NewLogID()
 	}
 
+	if len(turnRunLog.LogID) == 0 {
+		turnRunLog.LogID = logs.NewLogID()
+	}
 	return turnRunLog.LogID
 }
 
@@ -391,6 +446,13 @@ type ExptTurnRunResult struct {
 	EvaluatorResults map[int64]*EvaluatorRecord
 	EvalErr          error
 	AsyncAbort       bool
+}
+
+func (e *ExptTurnRunResult) GetTargetResult() *EvalTargetRecord {
+	if e != nil {
+		return e.TargetResult
+	}
+	return nil
 }
 
 func (e *ExptTurnRunResult) SetTargetResult(er *EvalTargetRecord) *ExptTurnRunResult {
@@ -443,6 +505,18 @@ func (e *ExptTurnRunResult) AbortWithTargetResult(expt *Experiment) bool {
 	return false
 }
 
+func (e *ExptTurnRunResult) AbortWithEvaluatorResults(ctx context.Context, event *ExptItemEvalEvent) bool {
+	// evaluator async exec, check if any evaluator is in async invoking status
+	for _, record := range e.EvaluatorResults {
+		if record != nil && record.Status == EvaluatorRunStatusAsyncInvoking {
+			e.AsyncAbort = true
+			event.WithCtxForceNoRetry(ctx)
+			return true
+		}
+	}
+	return false
+}
+
 //go:generate  mockgen -destination  ./mocks/expt_scheduler_mock.go  --package mocks . ExptSchedulerMode
 type ExptSchedulerMode interface {
 	Mode() ExptRunMode
@@ -461,9 +535,10 @@ type CKDBConfig struct {
 }
 
 type EvalAsyncCtx struct {
-	Event       *ExptItemEvalEvent
-	TurnID      int64
-	AsyncUnixMS int64 // async call time with unix ms ts
-	Session     *Session
-	Callee      string
+	Event              *ExptItemEvalEvent
+	RecordID           int64
+	AsyncUnixMS        int64 // async call time with unix ms ts
+	Session            *Session
+	Callee             string
+	EvaluatorVersionID int64 // evaluator version id, used for evaluator async scenario
 }

@@ -6,6 +6,7 @@ enum StorageProvider {
     HDFS = 3
     ImageX = 4
     S3 = 5
+    ExternalUrl = 6
 
     /* 后端内部使用 */
     Abase = 100
@@ -73,6 +74,8 @@ enum SchemaKey {
     Float = 3
     Bool = 4
     Message = 5
+    SingleChoice = 6 // 单选
+    Trajectory = 7  // 轨迹
 }
 
 struct DatasetFeatures {
@@ -188,10 +191,12 @@ struct FieldTransformationConfig {
 }
 
 struct MultiModalSpec {
-    1: optional i64 max_file_count (api.js_conv="true", go.tag='json:"max_file_count"')               // 文件数量上限
-    2: optional i64 max_file_size (api.js_conv="true", go.tag='json:"max_file_size"')                // 文件大小上限
+    1: optional i64 max_file_count (api.js_conv="true", go.tag='json:"max_file_count"')              // 文件数量上限
+    2: optional i64 max_file_size (api.js_conv="true", go.tag='json:"max_file_size"')                // 文件大小上限，用于兜底，优先级低于 max_file_size_by_type
     3: optional list<string> supported_formats // 文件格式
     4: optional i32 max_part_count // 多模态节点总数上限
+    5: optional map<ContentType, list<string>> supported_formats_by_type // 按照类型区分的文件类型
+    6: optional map<ContentType, i64> max_file_size_by_type (api.js_conv="true", go.tag='json:"max_file_size_by_type"') // 按照类型区分的文件类型
 }
 
 // DatasetItem 数据内容
@@ -229,6 +234,7 @@ struct FieldData {
     5: optional list<ObjectStorage> attachments // 外部存储信息
     6: optional FieldDisplayFormat format       // 数据的渲染格式
     7: optional list<FieldData> parts           // 图文混排时，图文内容
+    8: optional string trace_id                 // 关联的 trace ID
 }
 
 struct ObjectStorage {
@@ -280,6 +286,7 @@ struct ItemErrorDetail {
     2: optional i32 index      // 单条错误数据在输入数据中的索引。从 0 开始，下同
     3: optional i32 start_index // [startIndex, endIndex] 表示区间错误范围, 如 ExceedDatasetCapacity 错误时
     4: optional i32 end_index
+    5: optional map<string, string> messages_by_field // ItemErrorType=MismatchSchema, key 为 FieldSchema.name, value 为错误信息
 }
 
 struct ItemErrorGroup {
@@ -294,4 +301,47 @@ struct CreateDatasetItemOutput {
     2: optional string item_key
     3: optional i64 item_id (api.js_conv="true", go.tag='json:"item_id"')
     4: optional bool is_new_item                   // 是否是新的 Item。提供 itemKey 时，如果 itemKey 在数据集中已存在数据，则不算做「新 Item」，该字段为 false。
+}
+
+typedef string MultiModalStoreStrategy(ts.enum="true")
+const MultiModalStoreStrategy MultiModalStoreStrategy_Passthrough = "passthrough" // 保留用户的外链
+const MultiModalStoreStrategy MultiModalStoreStrategy_Store = "store"             // 转存用户的 url 到平台内
+
+
+struct FieldWriteOption {
+    1: optional string field_name, // 写入时设置 field name 即可，自动根据草稿态的 schema 填充下方的 field key
+    2: optional string field_key,
+    4: optional MultiModalStoreOption multi_modal_store_opt,
+}
+
+struct MultiModalStoreOption {
+    1: optional MultiModalStoreStrategy multi_modal_store_strategy,
+    2: optional ContentType content_type, // 手动标记当前列本次导入的多模态类型，仅 image/video/audio 有效
+}
+
+struct Video {
+    1: optional string name,
+    2: optional string url,
+    3: optional string uri,
+    4: optional string thumb_url,
+
+    10: optional StorageProvider storage_provider (vt.defined_only = "true") // 当前多模态附件存储的 provider. 如果为空，则会从对应的 url 下载文件并上传到默认的存储中，并填充uri
+}
+
+struct Audio {
+    1: optional string format,
+    2: optional string url,
+    3: optional string name,
+    4: optional string uri,
+
+    10: optional StorageProvider storage_provider (vt.defined_only = "true") // 当前多模态附件存储的 provider. 如果为空，则会从对应的 url 下载文件并上传到默认的存储中，并填充uri
+}
+
+struct Image {
+    1: optional string name,
+    2: optional string url,
+    3: optional string uri,
+    4: optional string thumb_url,
+
+    10: optional StorageProvider storage_provider (vt.defined_only = "true") // 当前多模态附件存储的 provider. 如果为空，则会从对应的 url 下载文件并上传到默认的存储中，并填充uri
 }

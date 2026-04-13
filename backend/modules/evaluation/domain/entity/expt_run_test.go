@@ -4,6 +4,7 @@
 package entity
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/pkg/errno"
+	"github.com/coze-dev/coze-loop/backend/pkg/ctxcache"
 	"github.com/coze-dev/coze-loop/backend/pkg/errorx"
 )
 
@@ -351,6 +353,61 @@ func TestExptTurnRunResult_AbortWithTargetResult(t *testing.T) {
 			} else {
 				assert.False(t, tt.turnRunResult.AsyncAbort)
 			}
+		})
+	}
+}
+
+func TestExptTurnRunResult_AbortWithEvaluatorResults(t *testing.T) {
+	tests := []struct {
+		name          string
+		evaluatorRes  map[int64]*EvaluatorRecord
+		expectedAbort bool
+		expectedAsync bool
+	}{
+		{
+			name:          "EvaluatorResults 为 nil 不中止",
+			evaluatorRes:  nil,
+			expectedAbort: false,
+			expectedAsync: false,
+		},
+		{
+			name: "全部成功不中止",
+			evaluatorRes: map[int64]*EvaluatorRecord{
+				1: {ID: 100, EvaluatorVersionID: 1, Status: EvaluatorRunStatusSuccess},
+				2: {ID: 200, EvaluatorVersionID: 2, Status: EvaluatorRunStatusSuccess},
+			},
+			expectedAbort: false,
+			expectedAsync: false,
+		},
+		{
+			name: "存在 AsyncInvoking 中止并标记 AsyncAbort",
+			evaluatorRes: map[int64]*EvaluatorRecord{
+				1: {ID: 100, EvaluatorVersionID: 1, Status: EvaluatorRunStatusSuccess},
+				2: {ID: 200, EvaluatorVersionID: 2, Status: EvaluatorRunStatusAsyncInvoking},
+			},
+			expectedAbort: true,
+			expectedAsync: true,
+		},
+		{
+			name: "包含 nil record 不影响判断",
+			evaluatorRes: map[int64]*EvaluatorRecord{
+				1: nil,
+				2: {ID: 200, EvaluatorVersionID: 2, Status: EvaluatorRunStatusAsyncInvoking},
+			},
+			expectedAbort: true,
+			expectedAsync: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trr := &ExptTurnRunResult{EvaluatorResults: tt.evaluatorRes}
+			ctx := ctxcache.Init(context.Background())
+			event := &ExptItemEvalEvent{}
+
+			got := trr.AbortWithEvaluatorResults(ctx, event)
+			assert.Equal(t, tt.expectedAbort, got)
+			assert.Equal(t, tt.expectedAsync, trr.AsyncAbort)
 		})
 	}
 }

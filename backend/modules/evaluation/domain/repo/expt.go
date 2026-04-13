@@ -38,10 +38,12 @@ type IExptItemResultRepo interface {
 	BatchGet(ctx context.Context, spaceID, exptID int64, itemIDs []int64) ([]*entity.ExptItemResult, error)
 	BatchCreateNX(ctx context.Context, itemResults []*entity.ExptItemResult) error
 	ScanItemResults(ctx context.Context, exptID, cursor, limit int64, status []int32, spaceID int64) (results []*entity.ExptItemResult, ncursor int64, err error)
+	MGetItemResults(ctx context.Context, exptID int64, itemIDs []int64, spaceID int64) (results []*entity.ExptItemResult, err error)
 	ListItemResultsByExptID(ctx context.Context, exptID, spaceID int64, page entity.Page, desc bool) ([]*entity.ExptItemResult, int64, error)
 	GetItemIDListByExptID(ctx context.Context, exptID, spaceID int64) (itemIDList []int64, err error)
 	SaveItemResults(ctx context.Context, itemResults []*entity.ExptItemResult) error
 	GetItemTurnResults(ctx context.Context, spaceID, exptID, itemID int64) ([]*entity.ExptTurnResult, error)
+	MGetItemTurnResults(ctx context.Context, spaceID, exptID int64, itemIDs []int64) ([]*entity.ExptTurnResult, error)
 	UpdateItemsResult(ctx context.Context, spaceID, exptID int64, itemID []int64, ufields map[string]any) error
 	GetMaxItemIdxByExptID(ctx context.Context, exptID, spaceID int64) (int32, error)
 
@@ -54,6 +56,8 @@ type IExptItemResultRepo interface {
 
 type IExptTurnResultRepo interface {
 	ListTurnResult(ctx context.Context, spaceID, exptID int64, filter *entity.ExptTurnResultFilter, page entity.Page, desc bool) ([]*entity.ExptTurnResult, int64, error)
+	// ListTurnResultWithCursor 按 (item_idx, turn_idx, item_id, turn_id) 与 ListTurnResult 一致的顺序游标分页；cursor 为 nil 时返回 total，否则 total 为 0。
+	ListTurnResultWithCursor(ctx context.Context, spaceID, exptID int64, filter *entity.ExptTurnResultFilter, cursor *entity.ExptTurnResultListCursor, limit int, desc bool) ([]*entity.ExptTurnResult, int64, *entity.ExptTurnResultListCursor, error)
 	ListTurnResultByItemIDs(ctx context.Context, spaceID, exptID int64, itemIDs []int64, page entity.Page, desc bool) ([]*entity.ExptTurnResult, int64, error)
 	BatchGet(ctx context.Context, spaceID, exptID int64, itemIDs []int64) ([]*entity.ExptTurnResult, error)
 	Get(ctx context.Context, spaceID, exptID, itemID, turnID int64) (*entity.ExptTurnResult, error)

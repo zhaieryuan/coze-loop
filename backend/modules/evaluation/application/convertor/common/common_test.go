@@ -5,6 +5,7 @@ package common
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bytedance/gg/gptr"
 	"github.com/stretchr/testify/assert"
@@ -118,8 +119,7 @@ func TestConvertImageDTO2DO(t *testing.T) {
 				Name: gptr.Of("minimal.jpg"),
 			},
 			expected: &commonentity.Image{
-				Name:            gptr.Of("minimal.jpg"),
-				StorageProvider: gptr.Of(commonentity.StorageProvider(0)),
+				Name: gptr.Of("minimal.jpg"),
 			},
 		},
 	}
@@ -169,8 +169,7 @@ func TestConvertImageDO2DTO(t *testing.T) {
 				Name: gptr.Of("minimal.jpg"),
 			},
 			expected: &commondto.Image{
-				Name:            gptr.Of("minimal.jpg"),
-				StorageProvider: gptr.Of(dataset.StorageProvider(0)),
+				Name: gptr.Of("minimal.jpg"),
 			},
 		},
 	}
@@ -200,12 +199,18 @@ func TestConvertAudioDTO2DO(t *testing.T) {
 		{
 			name: "complete audio",
 			input: &commondto.Audio{
-				Format: gptr.Of("mp3"),
-				URL:    gptr.Of("https://example.com/audio.mp3"),
+				Format:          gptr.Of("mp3"),
+				URL:             gptr.Of("https://example.com/audio.mp3"),
+				Name:            gptr.Of("audio_test.mp3"),
+				URI:             gptr.Of("example_dir/audio.mp3"),
+				StorageProvider: gptr.Of(dataset.StorageProvider_ImageX),
 			},
 			expected: &commonentity.Audio{
-				Format: gptr.Of("mp3"),
-				URL:    gptr.Of("https://example.com/audio.mp3"),
+				Format:          gptr.Of("mp3"),
+				URL:             gptr.Of("https://example.com/audio.mp3"),
+				Name:            gptr.Of("audio_test.mp3"),
+				URI:             gptr.Of("example_dir/audio.mp3"),
+				StorageProvider: gptr.Of(commonentity.StorageProvider_ImageX),
 			},
 		},
 		{
@@ -244,12 +249,18 @@ func TestConvertAudioDO2DTO(t *testing.T) {
 		{
 			name: "complete audio",
 			input: &commonentity.Audio{
-				Format: gptr.Of("mp3"),
-				URL:    gptr.Of("https://example.com/audio.mp3"),
+				Format:          gptr.Of("mp3"),
+				URL:             gptr.Of("https://example.com/audio.mp3"),
+				Name:            gptr.Of("audio_test.mp3"),
+				URI:             gptr.Of("example_dir/audio.mp3"),
+				StorageProvider: gptr.Of(commonentity.StorageProvider_ImageX),
 			},
 			expected: &commondto.Audio{
-				Format: gptr.Of("mp3"),
-				URL:    gptr.Of("https://example.com/audio.mp3"),
+				Format:          gptr.Of("mp3"),
+				URL:             gptr.Of("https://example.com/audio.mp3"),
+				Name:            gptr.Of("audio_test.mp3"),
+				URI:             gptr.Of("example_dir/audio.mp3"),
+				StorageProvider: gptr.Of(dataset.StorageProvider(commonentity.StorageProvider_ImageX)),
 			},
 		},
 		{
@@ -267,6 +278,106 @@ func TestConvertAudioDO2DTO(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := ConvertAudioDO2DTO(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestConvertVideoDTO2DO(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *commondto.Video
+		expected *commonentity.Video
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "complete video",
+			input: &commondto.Video{
+				Name:            gptr.Of("test.mp4"),
+				URL:             gptr.Of("https://example.com/test.mp4"),
+				URI:             gptr.Of("uri://test.mp4"),
+				ThumbURL:        gptr.Of("https://example.com/thumb.mp4"),
+				StorageProvider: gptr.Of(dataset.StorageProvider_ImageX),
+			},
+			expected: &commonentity.Video{
+				Name:            gptr.Of("test.mp4"),
+				URL:             gptr.Of("https://example.com/test.mp4"),
+				URI:             gptr.Of("uri://test.mp4"),
+				ThumbURL:        gptr.Of("https://example.com/thumb.mp4"),
+				StorageProvider: gptr.Of(commonentity.StorageProvider_ImageX),
+			},
+		},
+		{
+			name: "minimal video",
+			input: &commondto.Video{
+				Name: gptr.Of("minimal.mp4"),
+			},
+			expected: &commonentity.Video{
+				Name: gptr.Of("minimal.mp4"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := ConvertVideoDTO2DO(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestConvertVideoDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *commonentity.Video
+		expected *commondto.Video
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "complete video",
+			input: &commonentity.Video{
+				Name:            gptr.Of("test.mp4"),
+				URL:             gptr.Of("https://example.com/test.mp4"),
+				URI:             gptr.Of("uri://test.mp4"),
+				ThumbURL:        gptr.Of("https://example.com/thumb.mp4"),
+				StorageProvider: gptr.Of(commonentity.StorageProvider_S3),
+			},
+			expected: &commondto.Video{
+				Name:            gptr.Of("test.mp4"),
+				URL:             gptr.Of("https://example.com/test.mp4"),
+				URI:             gptr.Of("uri://test.mp4"),
+				ThumbURL:        gptr.Of("https://example.com/thumb.mp4"),
+				StorageProvider: gptr.Of(dataset.StorageProvider(commonentity.StorageProvider_S3)),
+			},
+		},
+		{
+			name: "minimal video",
+			input: &commonentity.Video{
+				Name: gptr.Of("minimal.mp4"),
+			},
+			expected: &commondto.Video{
+				Name: gptr.Of("minimal.mp4"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := ConvertVideoDO2DTO(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -308,9 +419,8 @@ func TestConvertContentDTO2DO(t *testing.T) {
 			expected: &commonentity.Content{
 				ContentType: gptr.Of(commonentity.ContentType("image")),
 				Image: &commonentity.Image{
-					Name:            gptr.Of("test.jpg"),
-					URL:             gptr.Of("https://example.com/test.jpg"),
-					StorageProvider: gptr.Of(commonentity.StorageProvider(0)),
+					Name: gptr.Of("test.jpg"),
+					URL:  gptr.Of("https://example.com/test.jpg"),
 				},
 			},
 		},
@@ -407,9 +517,8 @@ func TestConvertContentDO2DTO(t *testing.T) {
 			expected: &commondto.Content{
 				ContentType: gptr.Of("image"),
 				Image: &commondto.Image{
-					Name:            gptr.Of("test.jpg"),
-					URL:             gptr.Of("https://example.com/test.jpg"),
-					StorageProvider: gptr.Of(dataset.StorageProvider(0)),
+					Name: gptr.Of("test.jpg"),
+					URL:  gptr.Of("https://example.com/test.jpg"),
 				},
 			},
 		},
@@ -1149,7 +1258,7 @@ func TestConvertModelConfigDTO2DO(t *testing.T) {
 				TopP:        gptr.Of(0.9),
 			},
 			expected: &commonentity.ModelConfig{
-				ModelID:     123,
+				ModelID:     gptr.Of(int64(123)),
 				ModelName:   "gpt-4",
 				Temperature: gptr.Of(0.7),
 				MaxTokens:   gptr.Of(int32(2048)),
@@ -1162,7 +1271,7 @@ func TestConvertModelConfigDTO2DO(t *testing.T) {
 				ModelID: gptr.Of(int64(456)),
 			},
 			expected: &commonentity.ModelConfig{
-				ModelID: 456,
+				ModelID: gptr.Of(int64(456)),
 			},
 		},
 	}
@@ -1192,7 +1301,7 @@ func TestConvertModelConfigDO2DTO(t *testing.T) {
 		{
 			name: "complete model config with model ID",
 			input: &commonentity.ModelConfig{
-				ModelID:     123,
+				ModelID:     gptr.Of(int64(123)),
 				ModelName:   "gpt-4",
 				Temperature: gptr.Of(0.7),
 				MaxTokens:   gptr.Of(int32(2048)),
@@ -1209,7 +1318,7 @@ func TestConvertModelConfigDO2DTO(t *testing.T) {
 		{
 			name: "model config with provider model ID",
 			input: &commonentity.ModelConfig{
-				ModelID:         0,
+				ModelID:         gptr.Of(int64(0)),
 				ProviderModelID: gptr.Of("456"),
 				ModelName:       "claude-3",
 				Temperature:     gptr.Of(0.5),
@@ -1223,7 +1332,7 @@ func TestConvertModelConfigDO2DTO(t *testing.T) {
 		{
 			name: "model config with invalid provider model ID",
 			input: &commonentity.ModelConfig{
-				ModelID:         0,
+				ModelID:         gptr.Of(int64(0)),
 				ProviderModelID: gptr.Of("invalid"),
 				ModelName:       "claude-3",
 			},
@@ -1393,4 +1502,255 @@ func TestOpenAPIBaseInfoDO2DTO(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestConvertRateLimitDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *commonentity.RateLimit
+		expected *commondto.RateLimit
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "complete rate limit with period",
+			input: &commonentity.RateLimit{
+				Rate:   gptr.Of(int32(100)),
+				Burst:  gptr.Of(int32(200)),
+				Period: gptr.Of(time.Minute * 5),
+			},
+			expected: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(100)),
+				Burst:  gptr.Of(int32(200)),
+				Period: gptr.Of("5m0s"),
+			},
+		},
+		{
+			name: "rate limit without period",
+			input: &commonentity.RateLimit{
+				Rate:  gptr.Of(int32(50)),
+				Burst: gptr.Of(int32(100)),
+			},
+			expected: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(50)),
+				Burst:  gptr.Of(int32(100)),
+				Period: nil,
+			},
+		},
+		{
+			name: "rate limit with second period",
+			input: &commonentity.RateLimit{
+				Rate:   gptr.Of(int32(10)),
+				Burst:  gptr.Of(int32(20)),
+				Period: gptr.Of(time.Second * 30),
+			},
+			expected: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(10)),
+				Burst:  gptr.Of(int32(20)),
+				Period: gptr.Of("30s"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := ConvertRateLimitDO2DTO(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestConvertRateLimitDTO2DO(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   *commondto.RateLimit
+		want    *commonentity.RateLimit
+		wantErr bool
+	}{
+		{
+			name:    "nil input",
+			input:   nil,
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "valid rate limit with period",
+			input: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(100)),
+				Burst:  gptr.Of(int32(200)),
+				Period: gptr.Of("5m"),
+			},
+			want: &commonentity.RateLimit{
+				Rate:   gptr.Of(int32(100)),
+				Burst:  gptr.Of(int32(200)),
+				Period: gptr.Of(time.Minute * 5),
+			},
+			wantErr: false,
+		},
+		{
+			name: "rate limit without period",
+			input: &commondto.RateLimit{
+				Rate:  gptr.Of(int32(50)),
+				Burst: gptr.Of(int32(100)),
+			},
+			want: &commonentity.RateLimit{
+				Rate:   gptr.Of(int32(50)),
+				Burst:  gptr.Of(int32(100)),
+				Period: nil,
+			},
+			wantErr: false,
+		},
+		{
+			name: "rate limit with second period",
+			input: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(10)),
+				Burst:  gptr.Of(int32(20)),
+				Period: gptr.Of("30s"),
+			},
+			want: &commonentity.RateLimit{
+				Rate:   gptr.Of(int32(10)),
+				Burst:  gptr.Of(int32(20)),
+				Period: gptr.Of(time.Second * 30),
+			},
+			wantErr: false,
+		},
+		{
+			name: "rate limit with hour period",
+			input: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(1000)),
+				Burst:  gptr.Of(int32(2000)),
+				Period: gptr.Of("1h"),
+			},
+			want: &commonentity.RateLimit{
+				Rate:   gptr.Of(int32(1000)),
+				Burst:  gptr.Of(int32(2000)),
+				Period: gptr.Of(time.Hour),
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid period format",
+			input: &commondto.RateLimit{
+				Rate:   gptr.Of(int32(100)),
+				Burst:  gptr.Of(int32(200)),
+				Period: gptr.Of("invalid"),
+			},
+			want:    nil,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ConvertRateLimitDTO2DO(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, got)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestConvertRuntimeParamDTO2DO(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *commondto.RuntimeParam
+		expected *commonentity.RuntimeParam
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "json value and demo",
+			input: &commondto.RuntimeParam{
+				JSONValue: gptr.Of(`{"model_config":{"model_id":"m-1"}}`),
+				JSONDemo:  gptr.Of(`{"model_config":{"model_id":"demo"}}`),
+			},
+			expected: &commonentity.RuntimeParam{
+				JSONValue: gptr.Of(`{"model_config":{"model_id":"m-1"}}`),
+				JSONDemo:  gptr.Of(`{"model_config":{"model_id":"demo"}}`),
+			},
+		},
+		{
+			name: "empty fields",
+			input: &commondto.RuntimeParam{
+				JSONValue: nil,
+				JSONDemo:  nil,
+			},
+			expected: &commonentity.RuntimeParam{
+				JSONValue: nil,
+				JSONDemo:  nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := ConvertRuntimeParamDTO2DO(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestConvertRuntimeParamDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *commonentity.RuntimeParam
+		expected *commondto.RuntimeParam
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "json value and demo",
+			input: &commonentity.RuntimeParam{
+				JSONValue: gptr.Of(`{"model_config":{"temperature":0.8}}`),
+				JSONDemo:  gptr.Of(`{"model_config":{"temperature":0.5}}`),
+			},
+			expected: &commondto.RuntimeParam{
+				JSONValue: gptr.Of(`{"model_config":{"temperature":0.8}}`),
+				JSONDemo:  gptr.Of(`{"model_config":{"temperature":0.5}}`),
+			},
+		},
+		{
+			name: "empty fields",
+			input: &commonentity.RuntimeParam{
+				JSONValue: nil,
+				JSONDemo:  nil,
+			},
+			expected: &commondto.RuntimeParam{
+				JSONValue: nil,
+				JSONDemo:  nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := ConvertRuntimeParamDO2DTO(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }

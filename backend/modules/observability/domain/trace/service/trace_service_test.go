@@ -10,7 +10,11 @@ import (
 	"testing"
 	"time"
 
+	timeutil "github.com/coze-dev/coze-loop/backend/pkg/time"
+
 	"github.com/coze-dev/coze-loop/backend/infra/middleware/session"
+	"github.com/coze-dev/coze-loop/backend/infra/redis"
+	"github.com/coze-dev/coze-loop/backend/infra/redis/mocks"
 	annotationpb "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/annotation"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/common"
 	kitexdataset "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/dataset"
@@ -52,7 +56,7 @@ func newTaskRepoMock(ctrl *gomock.Controller) *taskRepoMock {
 }
 
 func (m *taskRepoMock) ListNonFinalTask(context.Context, string) ([]int64, error) {
-	panic("unexpected call to ListNonFinalTask in taskRepoMock")
+	panic("unexpected call to ListNonFinalTaskBySpaceID in taskRepoMock")
 }
 
 func (m *taskRepoMock) AddNonFinalTask(context.Context, string, int64) error {
@@ -63,8 +67,8 @@ func (m *taskRepoMock) RemoveNonFinalTask(context.Context, string, int64) error 
 	panic("unexpected call to RemoveNonFinalTask in taskRepoMock")
 }
 
-func (m *taskRepoMock) GetTaskByRedis(context.Context, int64) (*taskentity.ObservabilityTask, error) {
-	panic("unexpected call to GetTaskByRedis in taskRepoMock")
+func (m *taskRepoMock) GetTaskByCache(context.Context, int64) (*taskentity.ObservabilityTask, error) {
+	panic("unexpected call to GetTaskByCache in taskRepoMock")
 }
 
 func (m *taskRepoMock) SetTask(context.Context, *taskentity.ObservabilityTask) error {
@@ -84,6 +88,7 @@ func TestTraceServiceImpl_GetTracesAdvanceInfo(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -100,23 +105,25 @@ func TestTraceServiceImpl_GetTracesAdvanceInfo(t *testing.T) {
 			name: "get traces advance info successfully",
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				repoMock := repomocks.NewMockITraceRepo(ctrl)
-				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(loop_span.SpanList{{
+				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(&repo.GetTraceResult{Spans: loop_span.SpanList{{
 					TraceID: "123",
 					SpanID:  "234",
-				}}, nil)
+				}}}, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitGetTrace(gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+				persistCmdMock := mocks.NewMockPersistentCmdable(ctrl)
 				return fields{
 					traceRepo:      repoMock,
 					traceConfig:    confMock,
 					buildHelper:    buildHelper,
 					metrics:        metricsMock,
 					tenantProvider: tenantProviderMock,
+					persistCmd:     persistCmdMock,
 				}
 			},
 			args: args{
@@ -143,19 +150,16 @@ func TestTraceServiceImpl_GetTracesAdvanceInfo(t *testing.T) {
 			name: "get traces advance info successfully with processor",
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				repoMock := repomocks.NewMockITraceRepo(ctrl)
-				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(loop_span.SpanList{{
+				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(&repo.GetTraceResult{Spans: loop_span.SpanList{{
 					TraceID:     "123",
 					SpanID:      "234",
 					WorkspaceID: "123",
-				}}, nil)
+				}}}, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock,
-					nil,
-					nil,
-					[]span_processor.Factory{span_processor.NewCheckProcessorFactory()},
-					nil,
-					nil,
-					nil)
+					map[entity.ProcessorScene][]span_processor.Factory{
+						entity.SceneAdvanceInfo: {span_processor.NewCheckProcessorFactory()},
+					})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitGetTrace(gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				confMock := confmocks.NewMockITraceConfig(ctrl)
@@ -198,7 +202,7 @@ func TestTraceServiceImpl_GetTracesAdvanceInfo(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitGetTrace(gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -239,6 +243,7 @@ func TestTraceServiceImpl_GetTracesAdvanceInfo(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			got, err := r.GetTracesAdvanceInfo(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -258,6 +263,7 @@ func TestTraceServiceImpl_IngestTraces(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -278,7 +284,7 @@ func TestTraceServiceImpl_IngestTraces(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceProducer:  producerMock,
 					traceConfig:    confMock,
@@ -308,7 +314,7 @@ func TestTraceServiceImpl_IngestTraces(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceProducer:  producerMock,
 					traceConfig:    confMock,
@@ -345,6 +351,7 @@ func TestTraceServiceImpl_IngestTraces(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			err := r.IngestTraces(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -363,6 +370,7 @@ func TestTraceServiceImpl_GetTracesMetaInfo(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -400,7 +408,7 @@ func TestTraceServiceImpl_GetTracesMetaInfo(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceConfig:    confMock,
 					buildHelper:    buildHelper,
@@ -431,7 +439,7 @@ func TestTraceServiceImpl_GetTracesMetaInfo(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceConfig:    confMock,
 					buildHelper:    buildHelper,
@@ -464,6 +472,7 @@ func TestTraceServiceImpl_GetTracesMetaInfo(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			got, err := r.GetTracesMetaInfo(tt.args.ctx, tt.args.req)
 			if tt.wantErr {
@@ -487,6 +496,7 @@ func TestTraceServiceImpl_ListAnnotations(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -510,9 +520,9 @@ func TestTraceServiceImpl_ListAnnotations(t *testing.T) {
 				}}, nil)
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:      repoMock,
 					traceConfig:    confMock,
@@ -544,9 +554,9 @@ func TestTraceServiceImpl_ListAnnotations(t *testing.T) {
 				repoMock.EXPECT().ListAnnotations(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("repo error"))
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:      repoMock,
 					traceConfig:    confMock,
@@ -570,9 +580,9 @@ func TestTraceServiceImpl_ListAnnotations(t *testing.T) {
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("config error")).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("config error")).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceConfig:    confMock,
 					buildHelper:    buildHelper,
@@ -606,6 +616,7 @@ func TestTraceServiceImpl_ListAnnotations(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			got, err := r.ListAnnotations(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -625,6 +636,7 @@ func TestTraceServiceImpl_UpdateManualAnnotation(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -662,7 +674,7 @@ func TestTraceServiceImpl_UpdateManualAnnotation(t *testing.T) {
 				}, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -710,7 +722,7 @@ func TestTraceServiceImpl_UpdateManualAnnotation(t *testing.T) {
 					},
 				}, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -745,7 +757,7 @@ func TestTraceServiceImpl_UpdateManualAnnotation(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("config error")).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repomocks.NewMockITraceRepo(ctrl),
 					traceConfig:        confMock,
@@ -774,7 +786,7 @@ func TestTraceServiceImpl_UpdateManualAnnotation(t *testing.T) {
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("repo error"))
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -817,6 +829,7 @@ func TestTraceServiceImpl_UpdateManualAnnotation(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			err := r.UpdateManualAnnotation(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -835,6 +848,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -868,7 +882,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 				}, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -902,7 +916,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("config error")).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repomocks.NewMockITraceRepo(ctrl),
 					traceConfig:        confMock,
@@ -931,7 +945,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("repo error"))
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -967,7 +981,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{}, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -1015,7 +1029,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 				}, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(errorx.WrapByCode(fmt.Errorf("insert error"), obErrorx.CommercialCommonRPCErrorCodeCode))
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:          repoMock,
 					traceConfig:        confMock,
@@ -1058,6 +1072,7 @@ func TestTraceServiceImpl_CreateManualAnnotation(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			got, err := r.CreateManualAnnotation(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -1079,6 +1094,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -1118,7 +1134,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterMock.EXPECT().BuildALLSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1164,7 +1180,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterMock.EXPECT().BuildALLSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1239,7 +1255,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterMock.EXPECT().BuildRootSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1285,7 +1301,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterMock.EXPECT().BuildLLMSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1333,14 +1349,9 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
 				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock,
-					nil,
-					[]span_processor.Factory{
-						span_processor.NewCheckProcessorFactory(),
-					},
-					nil,
-					nil,
-					nil,
-					nil)
+					map[entity.ProcessorScene][]span_processor.Factory{
+						entity.SceneListSpans: {span_processor.NewCheckProcessorFactory()},
+					})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1390,14 +1401,9 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
 				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock,
-					nil,
-					[]span_processor.Factory{
-						span_processor.NewCheckProcessorFactory(),
-					},
-					nil,
-					nil,
-					nil,
-					nil)
+					map[entity.ProcessorScene][]span_processor.Factory{
+						entity.SceneListSpans: {span_processor.NewCheckProcessorFactory()},
+					})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1430,7 +1436,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterMock.EXPECT().BuildALLSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceConfig:    confMock,
 					buildHelper:    buildHelper,
@@ -1460,7 +1466,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				filterMock.EXPECT().BuildALLSpanFilter(gomock.Any(), gomock.Any()).Return(nil, nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				filterFactoryMock.EXPECT().GetFilter(gomock.Any(), gomock.Any()).Return(filterMock, nil)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitListSpans(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -1497,6 +1503,7 @@ func TestTraceServiceImpl_ListSpans(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			got, err := r.ListSpans(tt.args.ctx, tt.args.req)
 			assert.Equal(t, err != nil, tt.wantErr)
@@ -1516,6 +1523,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -1556,7 +1564,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				repoMock.EXPECT().GetAnnotation(gomock.Any(), gomock.Any()).Return(nil, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1587,7 +1595,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				confMock.EXPECT().GetAnnotationSourceCfg(gomock.Any()).Return(nil, fmt.Errorf("config error"))
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1619,7 +1627,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				}, nil)
 				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("repo error"))
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1657,7 +1665,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{}}, nil)
 				annoProducerMock.EXPECT().SendAnnotation(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1708,7 +1716,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				repoMock.EXPECT().GetAnnotation(gomock.Any(), gomock.Any()).Return(nil, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(fmt.Errorf("insert error"))
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1769,7 +1777,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				repoMock.EXPECT().GetAnnotation(gomock.Any(), gomock.Any()).Return(nil, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1814,7 +1822,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				// Expect annotation to be sent via producer when no span found
 				annoProducerMock.EXPECT().SendAnnotation(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1855,6 +1863,7 @@ func TestTraceServiceImpl_CreateAnnotation(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			err := r.CreateAnnotation(tt.args.ctx, tt.args.req)
 			t.Log(err)
@@ -1874,6 +1883,7 @@ func TestTraceServiceImpl_DeleteAnnotation(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -1912,7 +1922,7 @@ func TestTraceServiceImpl_DeleteAnnotation(t *testing.T) {
 				}, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -1969,7 +1979,7 @@ func TestTraceServiceImpl_DeleteAnnotation(t *testing.T) {
 				)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -2012,7 +2022,7 @@ func TestTraceServiceImpl_DeleteAnnotation(t *testing.T) {
 				// Expect annotation to be sent via producer when no span found
 				annoProducerMock.EXPECT().SendAnnotation(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				return fields{
@@ -2176,6 +2186,7 @@ func TestTraceServiceImpl_DeleteAnnotation(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			err := r.DeleteAnnotation(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -2194,6 +2205,7 @@ func TestTraceServiceImpl_DeleteManualAnnotation(t *testing.T) {
 		tenantProvider     tenant.ITenantProvider
 		evalSvc            rpc.IEvaluatorRPCAdapter
 		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
 	}
 	type args struct {
 		ctx context.Context
@@ -2226,7 +2238,7 @@ func TestTraceServiceImpl_DeleteManualAnnotation(t *testing.T) {
 				}, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(nil)
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceRepo:      repoMock,
 					traceConfig:    confMock,
@@ -2255,7 +2267,7 @@ func TestTraceServiceImpl_DeleteManualAnnotation(t *testing.T) {
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
 				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("config error")).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				return fields{
 					traceConfig:    confMock,
 					buildHelper:    buildHelper,
@@ -2417,6 +2429,7 @@ func TestTraceServiceImpl_DeleteManualAnnotation(t *testing.T) {
 				fields.tenantProvider,
 				fields.evalSvc,
 				fields.taskRepo,
+				fields.persistCmd,
 			)
 			err := r.DeleteManualAnnotation(tt.args.ctx, tt.args.req)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -2448,17 +2461,17 @@ func TestTraceServiceImpl_GetTrace(t *testing.T) {
 			name: "get trace successfully",
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				repoMock := repomocks.NewMockITraceRepo(ctrl)
-				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(loop_span.SpanList{
+				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(&repo.GetTraceResult{Spans: loop_span.SpanList{
 					{
 						TraceID: "123",
 						SpanID:  "234",
 					},
-				}, nil)
+				}}, nil)
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitGetTrace(gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -2490,24 +2503,21 @@ func TestTraceServiceImpl_GetTrace(t *testing.T) {
 			name: "get trace successfully with processor",
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				repoMock := repomocks.NewMockITraceRepo(ctrl)
-				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(loop_span.SpanList{
+				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(&repo.GetTraceResult{Spans: loop_span.SpanList{
 					{
 						TraceID:     "123",
 						SpanID:      "234",
 						WorkspaceID: "123",
 					},
-				}, nil)
+				}}, nil)
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock,
-					[]span_processor.Factory{span_processor.NewCheckProcessorFactory()},
-					nil,
-					nil,
-					nil,
-					nil,
-					nil)
+					map[entity.ProcessorScene][]span_processor.Factory{
+						entity.SceneGetTrace: {span_processor.NewCheckProcessorFactory()},
+					})
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitGetTrace(gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -2542,7 +2552,7 @@ func TestTraceServiceImpl_GetTrace(t *testing.T) {
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("bad")).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("bad")).AnyTimes()
 				return fields{
 					traceConfig:    confMock,
 					tenantProvider: tenantProviderMock,
@@ -2564,7 +2574,7 @@ func TestTraceServiceImpl_GetTrace(t *testing.T) {
 				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("failed"))
 				confMock := confmocks.NewMockITraceConfig(ctrl)
 				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
 				metricsMock := metricmocks.NewMockITraceMetrics(ctrl)
 				metricsMock.EXPECT().EmitGetTrace(gomock.Any(), gomock.Any(), gomock.Any()).Return()
 				return fields{
@@ -2662,7 +2672,9 @@ func TestTraceServiceImpl_Send(t *testing.T) {
 				repoMock := repomocks.NewMockITraceRepo(ctrl)
 				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{
 					Spans: loop_span.SpanList{
-						{},
+						{
+							SpanID: "span1",
+						},
 					},
 				}, nil)
 				repoMock.EXPECT().InsertAnnotations(gomock.Any(), gomock.Any()).Return(fmt.Errorf("insert error"))
@@ -2695,6 +2707,47 @@ func TestTraceServiceImpl_Send(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "spanid is blank",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{
+					Spans: loop_span.SpanList{
+						{
+							SpanID: "",
+						},
+					},
+				}, nil)
+				confMock := confmocks.NewMockITraceConfig(ctrl)
+				confMock.EXPECT().GetAnnotationSourceCfg(gomock.Any()).Return(&config.AnnotationSourceConfig{
+					SourceCfg: map[string]config.AnnotationConfig{
+						"caller1": {
+							AnnotationType: "test",
+							Tenants:        []string{"spans"},
+						},
+					},
+				}, nil)
+				return fields{
+					traceRepo:   repoMock,
+					traceConfig: confMock,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				event: &entity.AnnotationEvent{
+					Annotation: &loop_span.Annotation{
+						SpanID:         "span1",
+						TraceID:        "trace1",
+						WorkspaceID:    "workspace1",
+						AnnotationType: "123",
+						Key:            "12",
+					},
+					Caller:     "caller1",
+					RetryTimes: 2,
+				},
+			},
+			wantErr: false,
 		},
 	}
 	for _, tt := range tests {
@@ -2734,6 +2787,7 @@ func TestTraceServiceImpl_SearchTraceOApi(t *testing.T) {
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				repoMock := repomocks.NewMockITraceRepo(ctrl)
 				repoMock.EXPECT().GetTrace(gomock.Any(), &repo.GetTraceParam{
+					WorkSpaceID:        "123",
 					Tenants:            []string{"tenant1"},
 					TraceID:            "trace-123",
 					LogID:              "",
@@ -2744,16 +2798,17 @@ func TestTraceServiceImpl_SearchTraceOApi(t *testing.T) {
 					NotQueryAnnotation: false,
 					Filters:            nil,
 					OmitColumns:        []string{"input", "output"},
-				}).Return(loop_span.SpanList{
+					DescByStartTime:    true,
+				}).Return(&repo.GetTraceResult{Spans: loop_span.SpanList{
 					{
 						TraceID:   "trace-123",
 						SpanID:    "span-456",
 						StartTime: 1640995200000000,
 					},
-				}, nil)
+				}}, nil)
 
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 
 				return fields{
 					traceRepo:   repoMock,
@@ -2790,7 +2845,7 @@ func TestTraceServiceImpl_SearchTraceOApi(t *testing.T) {
 				repoMock.EXPECT().GetTrace(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("repo error"))
 
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 
 				return fields{
 					traceRepo:   repoMock,
@@ -2850,7 +2905,7 @@ func TestTraceServiceImpl_ListSpansOApi(t *testing.T) {
 			name: "list spans failed due to invalid filter",
 			fieldsGetter: func(ctrl *gomock.Controller) fields {
 				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
-				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, nil, nil, nil, nil, nil, nil)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
 
 				return fields{
 					buildHelper: buildHelper,
@@ -2879,6 +2934,341 @@ func TestTraceServiceImpl_ListSpansOApi(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "list spans successfully with valid request",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockFilter := filtermocks.NewMockFilter(ctrl)
+
+				filterFactoryMock.EXPECT().
+					GetFilter(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(mockFilter, nil)
+
+				mockFilter.EXPECT().
+					BuildBasicSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, true, nil)
+
+				mockFilter.EXPECT().
+					BuildALLSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "123",
+								StartTime:   1640995200000,
+							},
+							{
+								SpanID:      "span-2",
+								TraceID:     "trace-1",
+								WorkspaceID: "123",
+								StartTime:   1640995300000,
+							},
+						},
+						PageToken: "next-token",
+						HasMore:   true,
+					}, nil)
+
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:   mockRepo,
+					buildHelper: buildHelper,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListSpansOApiReq{
+					WorkspaceID: 123,
+					Tenants:     []string{"tenant1"},
+					StartTime:   1640995200000,
+					EndTime:     1640995800000,
+					Filters: &loop_span.FilterFields{
+						FilterFields: []*loop_span.FilterField{
+							{
+								FieldName: "span_type",
+								FieldType: loop_span.FieldTypeString,
+								Values:    []string{"model"},
+								QueryType: ptr.Of(loop_span.QueryTypeEnumIn),
+							},
+						},
+					},
+					Limit:        100,
+					PlatformType: loop_span.PlatformCozeLoop,
+					SpanListType: loop_span.SpanListTypeAllSpan,
+				},
+			},
+			want: &ListSpansOApiResp{
+				Spans: loop_span.SpanList{
+					{
+						SpanID:      "span-1",
+						TraceID:     "trace-1",
+						WorkspaceID: "123",
+						StartTime:   1640995200000,
+					},
+					{
+						SpanID:      "span-2",
+						TraceID:     "trace-1",
+						WorkspaceID: "123",
+						StartTime:   1640995300000,
+					},
+				},
+				NextPageToken: "next-token",
+				HasMore:       true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "list spans returns empty when builtin filter returns nil",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockFilter := filtermocks.NewMockFilter(ctrl)
+
+				filterFactoryMock.EXPECT().
+					GetFilter(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(mockFilter, nil)
+
+				mockFilter.EXPECT().
+					BuildBasicSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, false, nil)
+
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					buildHelper: buildHelper,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListSpansOApiReq{
+					WorkspaceID:  123,
+					Tenants:      []string{"tenant1"},
+					StartTime:    1640995200000,
+					EndTime:      1640995800000,
+					Limit:        100,
+					PlatformType: loop_span.PlatformCozeLoop,
+					SpanListType: loop_span.SpanListTypeAllSpan,
+				},
+			},
+			want: &ListSpansOApiResp{
+				Spans: loop_span.SpanList{},
+			},
+			wantErr: false,
+		},
+		{
+			name: "list spans failed due to platform filter error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+
+				filterFactoryMock.EXPECT().
+					GetFilter(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(nil, errorx.NewByCode(obErrorx.CommercialCommonInternalErrorCodeCode))
+
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					buildHelper: buildHelper,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListSpansOApiReq{
+					WorkspaceID:  123,
+					Tenants:      []string{"tenant1"},
+					StartTime:    1640995200000,
+					EndTime:      1640995800000,
+					Limit:        100,
+					PlatformType: loop_span.PlatformCozeLoop,
+					SpanListType: loop_span.SpanListTypeAllSpan,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "list spans failed due to repo error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockFilter := filtermocks.NewMockFilter(ctrl)
+
+				filterFactoryMock.EXPECT().
+					GetFilter(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(mockFilter, nil)
+
+				mockFilter.EXPECT().
+					BuildBasicSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, true, nil)
+
+				mockFilter.EXPECT().
+					BuildALLSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(nil, errorx.NewByCode(obErrorx.CommercialCommonInternalErrorCodeCode))
+
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:   mockRepo,
+					buildHelper: buildHelper,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListSpansOApiReq{
+					WorkspaceID:  123,
+					Tenants:      []string{"tenant1"},
+					StartTime:    1640995200000,
+					EndTime:      1640995800000,
+					Limit:        100,
+					PlatformType: loop_span.PlatformCozeLoop,
+					SpanListType: loop_span.SpanListTypeAllSpan,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "list spans with pagination",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockFilter := filtermocks.NewMockFilter(ctrl)
+
+				filterFactoryMock.EXPECT().
+					GetFilter(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(mockFilter, nil)
+
+				mockFilter.EXPECT().
+					BuildBasicSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, true, nil)
+
+				mockFilter.EXPECT().
+					BuildALLSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-3",
+								TraceID:     "trace-1",
+								WorkspaceID: "123",
+								StartTime:   1640995400000,
+							},
+						},
+						PageToken: "page-token-2",
+						HasMore:   false,
+					}, nil)
+
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:   mockRepo,
+					buildHelper: buildHelper,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListSpansOApiReq{
+					WorkspaceID:     123,
+					Tenants:         []string{"tenant1"},
+					StartTime:       1640995200000,
+					EndTime:         1640995800000,
+					Limit:           10,
+					DescByStartTime: true,
+					PageToken:       "page-token-1",
+					PlatformType:    loop_span.PlatformCozeLoop,
+					SpanListType:    loop_span.SpanListTypeAllSpan,
+				},
+			},
+			want: &ListSpansOApiResp{
+				Spans: loop_span.SpanList{
+					{
+						SpanID:      "span-3",
+						TraceID:     "trace-1",
+						WorkspaceID: "123",
+						StartTime:   1640995400000,
+					},
+				},
+				NextPageToken: "page-token-2",
+				HasMore:       false,
+			},
+			wantErr: false,
+		},
+		{
+			name: "list spans with third party workspace id",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockFilter := filtermocks.NewMockFilter(ctrl)
+
+				filterFactoryMock.EXPECT().
+					GetFilter(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(mockFilter, nil)
+
+				mockFilter.EXPECT().
+					BuildBasicSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, true, nil)
+
+				mockFilter.EXPECT().
+					BuildALLSpanFilter(gomock.Any(), gomock.Any()).
+					Return([]*loop_span.FilterField{}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "123",
+								StartTime:   1640995200000,
+							},
+						},
+						HasMore: false,
+					}, nil)
+
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:   mockRepo,
+					buildHelper: buildHelper,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListSpansOApiReq{
+					WorkspaceID:           123,
+					ThirdPartyWorkspaceID: "third-party-ws-1",
+					Tenants:               []string{"tenant1"},
+					StartTime:             1640995200000,
+					EndTime:               1640995800000,
+					Limit:                 100,
+					PlatformType:          loop_span.PlatformCozeLoop,
+					SpanListType:          loop_span.SpanListTypeAllSpan,
+				},
+			},
+			want: &ListSpansOApiResp{
+				Spans: loop_span.SpanList{
+					{
+						SpanID:      "span-1",
+						TraceID:     "trace-1",
+						WorkspaceID: "123",
+						StartTime:   1640995200000,
+					},
+				},
+				NextPageToken: "",
+				HasMore:       false,
+			},
+			wantErr: false,
 		},
 	}
 	for _, tt := range tests {
@@ -2930,12 +3320,9 @@ func TestTraceFilterProcessorBuilderImpl_BuildListSpansOApiProcessors(t *testing
 			filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 			builder := NewTraceFilterProcessorBuilder(
 				filterFactoryMock,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				tt.listSpansOApiProcessorFactories,
+				map[entity.ProcessorScene][]span_processor.Factory{
+					entity.SceneListSpansOApi: tt.listSpansOApiProcessorFactories,
+				},
 			)
 
 			got, err := builder.BuildListSpansOApiProcessors(context.Background(), span_processor.Settings{
@@ -3010,7 +3397,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 				evalMock := rpcmocks.NewMockIEvaluatorRPCAdapter(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 
 				span := buildSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
@@ -3036,8 +3423,8 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 					evalSvc:        evalMock,
 					after: func(t *testing.T, resp *ChangeEvaluatorScoreResp) {
 						assert.NotNil(t, resp)
-						if assert.NotNil(t, capturedUpsert) && assert.NotEmpty(t, capturedUpsert.Annotations) {
-							updated := capturedUpsert.Annotations[0]
+						if assert.NotNil(t, capturedUpsert) && assert.NotEmpty(t, capturedUpsert.Span.Annotations) {
+							updated := capturedUpsert.Span.Annotations[0]
 							assert.Len(t, updated.Corrections, 2)
 							assert.InDelta(t, req.Correction.GetScore(), updated.Value.FloatValue, 1e-9)
 							assert.Equal(t, defaultUserID, updated.UpdatedBy)
@@ -3079,7 +3466,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 				evalMock := rpcmocks.NewMockIEvaluatorRPCAdapter(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				span := buildSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
 				annotation := buildAnnotation(req, span)
@@ -3097,8 +3484,8 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 					tenantProvider: tenantMock,
 					evalSvc:        evalMock,
 					after: func(t *testing.T, _ *ChangeEvaluatorScoreResp) {
-						if assert.NotNil(t, capturedUpsert) && assert.NotEmpty(t, capturedUpsert.Annotations) {
-							assert.Len(t, capturedUpsert.Annotations[0].Corrections, 2)
+						if assert.NotNil(t, capturedUpsert) && assert.NotEmpty(t, capturedUpsert.Span.Annotations) {
+							assert.Len(t, capturedUpsert.Span.Annotations[0].Corrections, 2)
 						}
 					},
 				}
@@ -3128,7 +3515,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 			name: "get tenants error",
 			fieldsGetter: func(ctrl *gomock.Controller, req *ChangeEvaluatorScoreRequest) fields {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return(nil, fmt.Errorf("tenant err"))
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return(nil, fmt.Errorf("tenant err"))
 				return fields{
 					tenantProvider: tenantMock,
 				}
@@ -3158,7 +3545,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("list error"))
 
 				return fields{
@@ -3191,7 +3578,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{}}, nil)
 
 				return fields{
@@ -3224,7 +3611,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				span := buildSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
 				traceRepoMock.EXPECT().GetAnnotation(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("annotation error"))
@@ -3259,7 +3646,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				span := buildSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
 				traceRepoMock.EXPECT().GetAnnotation(gomock.Any(), gomock.Any()).Return(nil, nil)
@@ -3294,7 +3681,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				span := buildSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
 				annotation := buildAnnotation(req, span)
@@ -3331,7 +3718,7 @@ func TestTraceServiceImpl_ChangeEvaluatorScore(t *testing.T) {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
 				evalMock := rpcmocks.NewMockIEvaluatorRPCAdapter(ctrl)
 
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				span := buildSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
 				annotation := buildAnnotation(req, span)
@@ -3421,12 +3808,9 @@ func TestTraceFilterProcessorBuilderImpl_BuildIngestTraceProcessors_ErrorHandlin
 
 			builder := NewTraceFilterProcessorBuilder(
 				filterFactoryMock,
-				nil,
-				nil,
-				nil,
-				tt.ingestTraceProcessorFactories,
-				nil,
-				nil,
+				map[entity.ProcessorScene][]span_processor.Factory{
+					entity.SceneIngestTrace: tt.ingestTraceProcessorFactories,
+				},
 			)
 
 			got, err := builder.BuildIngestTraceProcessors(context.Background(), span_processor.Settings{})
@@ -3568,12 +3952,9 @@ func TestTraceFilterProcessorBuilderImpl_BuildSearchTraceOApiProcessors_ErrorHan
 			filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
 			builder := NewTraceFilterProcessorBuilder(
 				filterFactoryMock,
-				nil,
-				nil,
-				nil,
-				nil,
-				tt.searchTraceOApiProcessorFactories,
-				nil,
+				map[entity.ProcessorScene][]span_processor.Factory{
+					entity.SceneSearchTraceOApi: tt.searchTraceOApiProcessorFactories,
+				},
 			)
 
 			got, err := builder.BuildSearchTraceOApiProcessors(context.Background(), span_processor.Settings{
@@ -3584,6 +3965,101 @@ func TestTraceFilterProcessorBuilderImpl_BuildSearchTraceOApiProcessors_ErrorHan
 
 			assert.Equal(t, tt.wantErr, err != nil)
 			if !tt.wantErr {
+				assert.Equal(t, tt.want, len(got))
+			}
+		})
+	}
+}
+
+func TestTraceFilterProcessorBuilderImpl_buildProcessors(t *testing.T) {
+	tests := []struct {
+		name               string
+		processorFactories map[entity.ProcessorScene][]span_processor.Factory
+		settings           span_processor.Settings
+		defaultScene       entity.ProcessorScene
+		want               int
+		wantErr            bool
+		errMsg             string
+	}{
+		{
+			name: "use default scene successfully",
+			processorFactories: map[entity.ProcessorScene][]span_processor.Factory{
+				entity.SceneListSpans: {
+					span_processor.NewCheckProcessorFactory(),
+				},
+			},
+			settings:     span_processor.Settings{},
+			defaultScene: entity.SceneListSpans,
+			want:         1,
+			wantErr:      false,
+		},
+		{
+			name: "use settings scene successfully",
+			processorFactories: map[entity.ProcessorScene][]span_processor.Factory{
+				entity.SceneGetTrace: {
+					span_processor.NewCheckProcessorFactory(),
+					span_processor.NewExpireErrorProcessorFactory(nil),
+				},
+			},
+			settings: span_processor.Settings{
+				Scene: entity.SceneGetTrace,
+			},
+			defaultScene: entity.SceneListSpans,
+			want:         2,
+			wantErr:      false,
+		},
+		{
+			name: "settings scene not found returns error",
+			processorFactories: map[entity.ProcessorScene][]span_processor.Factory{
+				entity.SceneListSpans: {
+					span_processor.NewCheckProcessorFactory(),
+				},
+			},
+			settings: span_processor.Settings{
+				Scene: "non_existent_scene",
+			},
+			defaultScene: entity.SceneListSpans,
+			want:         0,
+			wantErr:      true,
+			errMsg:       "processor factories not found for scene: non_existent_scene",
+		},
+		{
+			name: "empty factories returns empty processors",
+			processorFactories: map[entity.ProcessorScene][]span_processor.Factory{
+				entity.SceneListSpans: {},
+			},
+			settings:     span_processor.Settings{},
+			defaultScene: entity.SceneListSpans,
+			want:         0,
+			wantErr:      false,
+		},
+		{
+			name:               "default scene not found returns error",
+			processorFactories: map[entity.ProcessorScene][]span_processor.Factory{},
+			settings:           span_processor.Settings{},
+			defaultScene:       entity.SceneListSpans,
+			want:               0,
+			wantErr:            true,
+			errMsg:             "processor factories not found for scene: list_spans",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+			builder := NewTraceFilterProcessorBuilder(
+				filterFactoryMock,
+				tt.processorFactories,
+			).(*TraceFilterProcessorBuilderImpl)
+
+			got, err := builder.buildProcessors(context.Background(), tt.settings, tt.defaultScene)
+
+			assert.Equal(t, tt.wantErr, err != nil)
+			if tt.wantErr {
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
 				assert.Equal(t, tt.want, len(got))
 			}
 		})
@@ -3801,7 +4277,7 @@ func TestTraceServiceImpl_ExtractSpanInfo(t *testing.T) {
 			name: "success",
 			fieldsGetter: func(ctrl *gomock.Controller, req *ExtractSpanInfoRequest) fields {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				span := makeSpan(req)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{span}}, nil)
@@ -3836,7 +4312,7 @@ func TestTraceServiceImpl_ExtractSpanInfo(t *testing.T) {
 			name: "tenant error",
 			fieldsGetter: func(ctrl *gomock.Controller, req *ExtractSpanInfoRequest) fields {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return(nil, fmt.Errorf("tenant error"))
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return(nil, fmt.Errorf("tenant error"))
 				return fields{tenantProvider: tenantMock}
 			},
 			args: args{
@@ -3849,7 +4325,7 @@ func TestTraceServiceImpl_ExtractSpanInfo(t *testing.T) {
 			name: "list spans error",
 			fieldsGetter: func(ctrl *gomock.Controller, req *ExtractSpanInfoRequest) fields {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("list error"))
 				return fields{traceRepo: traceRepoMock, tenantProvider: tenantMock}
@@ -3864,7 +4340,7 @@ func TestTraceServiceImpl_ExtractSpanInfo(t *testing.T) {
 			name: "no spans",
 			fieldsGetter: func(ctrl *gomock.Controller, req *ExtractSpanInfoRequest) fields {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				traceRepoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: loop_span.SpanList{}}, nil)
 				return fields{traceRepo: traceRepoMock, tenantProvider: tenantMock}
@@ -3879,7 +4355,7 @@ func TestTraceServiceImpl_ExtractSpanInfo(t *testing.T) {
 			name: "build extract info error",
 			fieldsGetter: func(ctrl *gomock.Controller, req *ExtractSpanInfoRequest) fields {
 				tenantMock := tenantmocks.NewMockITenantProvider(ctrl)
-				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType).Return([]string{"tenant"}, nil)
+				tenantMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), req.PlatformType, gomock.Any()).Return([]string{"tenant"}, nil)
 				traceRepoMock := repomocks.NewMockITraceRepo(ctrl)
 				span := makeSpan(req)
 				span.Input = "invalid-json"
@@ -3948,5 +4424,1509 @@ func Test_buildContent(t *testing.T) {
 		result := buildContent(value)
 		assert.Equal(t, common.ContentTypeText, result.GetContentType())
 		assert.Equal(t, value, result.GetText())
+	})
+}
+
+func TestTraceServiceImpl_batchGetPreSpanFromCk(t *testing.T) {
+	type fields struct {
+		traceRepo repo.ITraceRepo
+	}
+	type args struct {
+		ctx       context.Context
+		spanIDs   []string
+		tenants   []string
+		startTime int64
+	}
+	tests := []struct {
+		name         string
+		fieldsGetter func(ctrl *gomock.Controller) fields
+		args         args
+		want         []*loop_span.Span
+		wantErr      bool
+	}{
+		{
+			name: "batch get pre span - normal case",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: []*loop_span.Span{
+					{SpanID: "span1", TraceID: "trace1"},
+					{SpanID: "span2", TraceID: "trace1"},
+				}}, nil)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx:       context.Background(),
+				spanIDs:   []string{"span1", "span2"},
+				tenants:   []string{"tenant1"},
+				startTime: time.Now().UnixMilli(),
+			},
+			want: []*loop_span.Span{
+				{SpanID: "span1", TraceID: "trace1"},
+				{SpanID: "span2", TraceID: "trace1"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "batch get pre span - empty span IDs",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{traceRepo: repomocks.NewMockITraceRepo(ctrl)}
+			},
+			args: args{
+				ctx:       context.Background(),
+				spanIDs:   []string{},
+				tenants:   []string{"tenant1"},
+				startTime: time.Now().UnixMilli(),
+			},
+			want:    []*loop_span.Span{},
+			wantErr: false,
+		},
+		{
+			name: "batch get pre span - single span",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: []*loop_span.Span{
+					{SpanID: "span1", TraceID: "trace1"},
+				}}, nil)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx:       context.Background(),
+				spanIDs:   []string{"span1"},
+				tenants:   []string{"tenant1"},
+				startTime: time.Now().UnixMilli(),
+			},
+			want: []*loop_span.Span{
+				{SpanID: "span1", TraceID: "trace1"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "batch get pre span - exactly 100 spans",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				// Should be called once since we have exactly 100 spans
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: []*loop_span.Span{
+					{SpanID: "span1", TraceID: "trace1"},
+				}}, nil)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx:       context.Background(),
+				spanIDs:   make([]string, 100), // Exactly 100 spans
+				tenants:   []string{"tenant1"},
+				startTime: time.Now().UnixMilli(),
+			},
+			want: []*loop_span.Span{
+				{SpanID: "span1", TraceID: "trace1"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "batch get pre span - more than 100 spans",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				// Should be called twice since we have 150 spans
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{Spans: []*loop_span.Span{
+					{SpanID: "span1", TraceID: "trace1"},
+				}}, nil).Times(2)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx:       context.Background(),
+				spanIDs:   make([]string, 150), // More than 100 spans
+				tenants:   []string{"tenant1"},
+				startTime: time.Now().UnixMilli(),
+			},
+			want: []*loop_span.Span{
+				{SpanID: "span1", TraceID: "trace1"},
+				{SpanID: "span1", TraceID: "trace1"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "batch get pre span - db error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("db error"))
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx:       context.Background(),
+				spanIDs:   []string{"span1"},
+				tenants:   []string{"tenant1"},
+				startTime: time.Now().UnixMilli(),
+			},
+			want:    nil,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			fields := tt.fieldsGetter(ctrl)
+			r := &TraceServiceImpl{
+				traceRepo: fields.traceRepo,
+			}
+			got, err := r.batchGetPreSpan(tt.args.ctx, tt.args.spanIDs, tt.args.tenants, tt.args.startTime-timeutil.Day2MillSec(30), tt.args.startTime+1)
+			assert.Equal(t, tt.wantErr, err != nil)
+			if !tt.wantErr {
+				assert.Equal(t, len(tt.want), len(got))
+			}
+		})
+	}
+}
+
+func TestTraceServiceImpl_ListPreSpan_Comprehensive(t *testing.T) {
+	type fields struct {
+		traceRepo          repo.ITraceRepo
+		traceConfig        config.ITraceConfig
+		traceProducer      mq.ITraceProducer
+		annotationProducer mq.IAnnotationProducer
+		metrics            metrics.ITraceMetrics
+		buildHelper        TraceFilterProcessorBuilder
+		tenantProvider     tenant.ITenantProvider
+		evalSvc            rpc.IEvaluatorRPCAdapter
+		taskRepo           taskRepo.ITaskRepo
+		persistCmd         redis.PersistentCmdable
+	}
+	type args struct {
+		ctx context.Context
+		req *ListPreSpanReq
+	}
+	tests := []struct {
+		name         string
+		fieldsGetter func(ctrl *gomock.Controller) fields
+		args         args
+		want         *ListPreSpanResp
+		wantErr      bool
+	}{
+		{
+			name: "list pre span successfully - full flow",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				// Mock GetPreSpanIDs
+				repoMock.EXPECT().GetPreSpanIDs(gomock.Any(), gomock.Any()).Return(
+					[]string{"span1", "span2", "current_span"},
+					[]string{"resp1", "resp2", "resp3"},
+					nil,
+				)
+				// Mock ListSpans for batchGetPreSpan
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(
+					&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:  "span1",
+								TraceID: "trace1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp1",
+									keyPreviousResponseID: "prev1",
+								},
+								WorkspaceID: "1",
+							},
+							{
+								SpanID:  "span2",
+								TraceID: "trace1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp2",
+									keyPreviousResponseID: "prev2",
+								},
+								WorkspaceID: "1",
+							},
+							{
+								SpanID:  "current_span",
+								TraceID: "trace1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp3",
+									keyPreviousResponseID: "prev_resp_id",
+								},
+								WorkspaceID: "1",
+							},
+						},
+					}, nil)
+
+				confMock := confmocks.NewMockITraceConfig(ctrl)
+				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:      repoMock,
+					traceConfig:    confMock,
+					buildHelper:    buildHelper,
+					tenantProvider: tenantProviderMock,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					StartTime:          time.Now().UnixMilli(),
+					TraceID:            "trace1",
+					SpanID:             "current_span",
+					PreviousResponseID: "prev_resp_id",
+					PlatformType:       loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanResp{
+				Spans: loop_span.SpanList{
+					{
+						SpanID:  "span1",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyResponseID:         "resp1",
+							keyPreviousResponseID: "prev1",
+						},
+						WorkspaceID: "1",
+					},
+					{
+						SpanID:  "span2",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyResponseID:         "resp2",
+							keyPreviousResponseID: "prev2",
+						},
+						WorkspaceID: "1",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "get tenants failed",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				confMock := confmocks.NewMockITraceConfig(ctrl)
+				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("tenant error")).AnyTimes()
+
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceConfig:    confMock,
+					buildHelper:    buildHelper,
+					tenantProvider: tenantProviderMock,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:  1,
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "get pre span IDs failed",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().GetPreSpanIDs(gomock.Any(), gomock.Any()).Return(nil, nil, fmt.Errorf("redis error"))
+
+				confMock := confmocks.NewMockITraceConfig(ctrl)
+				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:      repoMock,
+					traceConfig:    confMock,
+					buildHelper:    buildHelper,
+					tenantProvider: tenantProviderMock,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:  1,
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "batch get pre span failed",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().GetPreSpanIDs(gomock.Any(), gomock.Any()).Return(
+					[]string{"span1"},
+					[]string{"resp1"},
+					nil,
+				)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("db error"))
+
+				confMock := confmocks.NewMockITraceConfig(ctrl)
+				tenantProviderMock := tenantmocks.NewMockITenantProvider(ctrl)
+				tenantProviderMock.EXPECT().GetTenantsByPlatformType(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"spans"}, nil).AnyTimes()
+
+				filterFactoryMock := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				buildHelper := NewTraceFilterProcessorBuilder(filterFactoryMock, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				return fields{
+					traceRepo:      repoMock,
+					traceConfig:    confMock,
+					buildHelper:    buildHelper,
+					tenantProvider: tenantProviderMock,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:  1,
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			fields := tt.fieldsGetter(ctrl)
+			r, _ := NewTraceServiceImpl(
+				fields.traceRepo,
+				fields.traceConfig,
+				fields.traceProducer,
+				fields.annotationProducer,
+				fields.metrics,
+				fields.buildHelper,
+				fields.tenantProvider,
+				fields.evalSvc,
+				fields.taskRepo,
+				fields.persistCmd,
+			)
+			_, err := r.ListPreSpan(tt.args.ctx, tt.args.req)
+			assert.Equal(t, tt.wantErr, err != nil)
+		})
+	}
+}
+
+func TestTraceServiceImpl_checkGetPreSpanAuth_Comprehensive(t *testing.T) {
+	type fields struct {
+		traceRepo repo.ITraceRepo
+	}
+	type args struct {
+		ctx                context.Context
+		req                *ListPreSpanReq
+		tenants            []string
+		preAndCurrentSpans []*loop_span.Span
+	}
+	tests := []struct {
+		name         string
+		fieldsGetter func(ctrl *gomock.Controller) fields
+		args         args
+		wantErr      bool
+		errMsg       string
+	}{
+		{
+			name: "auth check success - current span in workspace",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{traceRepo: repomocks.NewMockITraceRepo(ctrl)}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span1",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev1",
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span1",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "prev1",
+						},
+						WorkspaceID: "1", // Same workspace
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "auth check success - database verification with result",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{
+					Spans: loop_span.SpanList{
+						{SpanID: "found_span", TraceID: "trace1", WorkspaceID: "1"},
+					},
+				}, nil)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span2",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev2",
+					StartTime:          time.Now().UnixMilli(),
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span2",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "prev2",
+						},
+						WorkspaceID: "999", // Different workspace
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "auth check failed - current span not found",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{traceRepo: repomocks.NewMockITraceRepo(ctrl)}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "missing_span",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev1",
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span1",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "prev1",
+						},
+						WorkspaceID: "1",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "current span not found",
+		},
+		{
+			name: "auth check failed - previous response ID mismatch",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{traceRepo: repomocks.NewMockITraceRepo(ctrl)}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span1",
+					TraceID:            "trace1",
+					PreviousResponseID: "expected_prev",
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span1",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "actual_prev", // Mismatch
+						},
+						WorkspaceID: "1",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "req previous_response_id is not current span's",
+		},
+		{
+			name: "auth check failed - database verification with no result",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(&repo.ListSpansResult{
+					Spans: loop_span.SpanList{}, // No spans found
+				}, nil)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span2",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev2",
+					StartTime:          time.Now().UnixMilli(),
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span2",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "prev2",
+						},
+						WorkspaceID: "999", // Different workspace
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "no span in this workspace",
+		},
+		{
+			name: "auth check failed - database verification error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				repoMock.EXPECT().ListSpans(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("db error"))
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span2",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev2",
+					StartTime:          time.Now().UnixMilli(),
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span2",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "prev2",
+						},
+						WorkspaceID: "999", // Different workspace
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "db error",
+		},
+		{
+			name: "auth check - empty preAndCurrentSpans",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span1",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev1",
+					StartTime:          time.Now().UnixMilli(),
+				},
+				tenants:            []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{}, // Empty
+			},
+			wantErr: true,
+			errMsg:  "current span not found",
+		},
+		{
+			name: "auth check - nil preAndCurrentSpans",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				repoMock := repomocks.NewMockITraceRepo(ctrl)
+				return fields{traceRepo: repoMock}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span1",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev1",
+					StartTime:          time.Now().UnixMilli(),
+				},
+				tenants:            []string{"tenant1"},
+				preAndCurrentSpans: nil, // Nil
+			},
+			wantErr: true,
+			errMsg:  "current span not found",
+		},
+		{
+			name: "auth check - workspace ID conversion edge case",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{traceRepo: repomocks.NewMockITraceRepo(ctrl)}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        0, // Zero workspace ID
+					SpanID:             "span1",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev1",
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SpanID:  "span1",
+						TraceID: "trace1",
+						SystemTagsString: map[string]string{
+							keyPreviousResponseID: "prev1",
+						},
+						WorkspaceID: "0", // String "0"
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "auth check - current span with missing previous response ID",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{traceRepo: repomocks.NewMockITraceRepo(ctrl)}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanReq{
+					WorkspaceID:        1,
+					SpanID:             "span1",
+					TraceID:            "trace1",
+					PreviousResponseID: "prev1",
+				},
+				tenants: []string{"tenant1"},
+				preAndCurrentSpans: []*loop_span.Span{
+					{
+						SystemTagsString: map[string]string{
+							// Missing keyPreviousResponseID
+						},
+						SpanID:      "span1",  // blankx
+						TraceID:     "trace1", // blankx
+						WorkspaceID: "1",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "req previous_response_id is not current span's",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			fields := tt.fieldsGetter(ctrl)
+			r := &TraceServiceImpl{
+				traceRepo: fields.traceRepo,
+			}
+			err := r.checkGetPreSpanAuth(tt.args.ctx, tt.args.req, tt.args.tenants, tt.args.preAndCurrentSpans)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestTraceServiceImpl_ListPreSpanBatch(t *testing.T) {
+	type fields struct {
+		traceRepo      repo.ITraceRepo
+		buildHelper    TraceFilterProcessorBuilder
+		tenantProvider tenant.ITenantProvider
+	}
+	type args struct {
+		ctx context.Context
+		req *ListPreSpanBatchReq
+	}
+	tests := []struct {
+		name         string
+		fieldsGetter func(ctrl *gomock.Controller) fields
+		args         args
+		want         *ListPreSpanBatchResp
+		wantErr      bool
+	}{
+		{
+			name: "empty items - should return empty results",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				return fields{}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID:  1,
+					StartTime:    time.Now().UnixMilli(),
+					Items:        []*ListPreSpanItem{},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanBatchResp{
+				Results: []*ListPreSpanResult{},
+			},
+			wantErr: false,
+		},
+		{
+			name: "single item - successful query",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+				mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				// Mock GetTenantsByPlatformType
+				mockTenantProvider.EXPECT().
+					GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return([]string{"tenant1"}, nil)
+
+				// Mock GetPreSpanIDs
+				mockRepo.EXPECT().
+					GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{
+						PreRespID: "prev-resp-1",
+					}).
+					Return([]string{"span-0"}, []string{"resp-0"}, nil)
+
+				// Mock ListSpans - will be called in batchGetPreSpan
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-0",
+									keyPreviousResponseID: "",
+								},
+							},
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-1",
+									keyPreviousResponseID: "prev-resp-1",
+								},
+							},
+						},
+					}, nil).
+					AnyTimes()
+
+				return fields{
+					traceRepo:      mockRepo,
+					buildHelper:    mockBuilder,
+					tenantProvider: mockTenantProvider,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID: 1,
+					StartTime:   time.Now().UnixMilli(),
+					Items: []*ListPreSpanItem{
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-1",
+							PreviousResponseID: "prev-resp-1",
+						},
+					},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanBatchResp{
+				Results: []*ListPreSpanResult{
+					{
+						TraceID:            "trace-1",
+						SpanID:             "span-1",
+						PreviousResponseID: "prev-resp-1",
+						Spans: loop_span.SpanList{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-0",
+									keyPreviousResponseID: "",
+								},
+							},
+						},
+						Error: nil,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "multiple items - all successful",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+				mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				mockTenantProvider.EXPECT().
+					GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return([]string{"tenant1"}, nil)
+
+				// Mock GetPreSpanIDs for item 1
+				mockRepo.EXPECT().
+					GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{
+						PreRespID: "prev-resp-1",
+					}).
+					Return([]string{"span-0"}, []string{"resp-0"}, nil)
+
+				// Mock GetPreSpanIDs for item 2
+				mockRepo.EXPECT().
+					GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{
+						PreRespID: "prev-resp-2",
+					}).
+					Return([]string{"span-10"}, []string{"resp-10"}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-0",
+								},
+							},
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-1",
+									keyPreviousResponseID: "prev-resp-1",
+								},
+							},
+							{
+								SpanID:      "span-10",
+								TraceID:     "trace-2",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-10",
+								},
+							},
+							{
+								SpanID:      "span-2",
+								TraceID:     "trace-2",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-2",
+									keyPreviousResponseID: "prev-resp-2",
+								},
+							},
+						},
+					}, nil).
+					AnyTimes()
+
+				return fields{
+					traceRepo:      mockRepo,
+					buildHelper:    mockBuilder,
+					tenantProvider: mockTenantProvider,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID: 1,
+					StartTime:   time.Now().UnixMilli(),
+					Items: []*ListPreSpanItem{
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-1",
+							PreviousResponseID: "prev-resp-1",
+						},
+						{
+							TraceID:            "trace-2",
+							SpanID:             "span-2",
+							PreviousResponseID: "prev-resp-2",
+						},
+					},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanBatchResp{
+				Results: []*ListPreSpanResult{
+					{
+						TraceID:            "trace-1",
+						SpanID:             "span-1",
+						PreviousResponseID: "prev-resp-1",
+						Spans: loop_span.SpanList{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-0",
+								},
+							},
+						},
+						Error: nil,
+					},
+					{
+						TraceID:            "trace-2",
+						SpanID:             "span-2",
+						PreviousResponseID: "prev-resp-2",
+						Spans: loop_span.SpanList{
+							{
+								SpanID:      "span-10",
+								TraceID:     "trace-2",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-10",
+								},
+							},
+						},
+						Error: nil,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "tenant provider error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+				mockTenantProvider.EXPECT().
+					GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return(nil, errorx.NewByCode(obErrorx.CommercialCommonInternalErrorCodeCode))
+
+				return fields{
+					tenantProvider: mockTenantProvider,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID: 1,
+					StartTime:   time.Now().UnixMilli(),
+					Items: []*ListPreSpanItem{
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-1",
+							PreviousResponseID: "prev-resp-1",
+						},
+					},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "span_id not found in redis lookup - empty previous_response_id should return per item error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+				mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				mockTenantProvider.EXPECT().
+					GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return([]string{"tenant1"}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+							},
+						},
+					}, nil).
+					AnyTimes()
+
+				return fields{
+					traceRepo:      mockRepo,
+					buildHelper:    mockBuilder,
+					tenantProvider: mockTenantProvider,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID: 1,
+					StartTime:   time.Now().UnixMilli(),
+					Items: []*ListPreSpanItem{
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-1",
+							PreviousResponseID: "",
+						},
+					},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanBatchResp{
+				Results: []*ListPreSpanResult{
+					{
+						TraceID:            "trace-1",
+						SpanID:             "span-1",
+						PreviousResponseID: "",
+						Error:              errorx.NewByCode(obErrorx.CommercialCommonInvalidParamCodeCode),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "auth check failed - previous_response_id mismatch should return per item error",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+				mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				mockTenantProvider.EXPECT().
+					GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return([]string{"tenant1"}, nil)
+
+				mockRepo.EXPECT().
+					GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{
+						PreRespID: "prev-resp-1",
+					}).
+					Return([]string{"span-0"}, []string{"resp-0"}, nil)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-0",
+								},
+							},
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-1",
+									keyPreviousResponseID: "wrong-prev-resp",
+								},
+							},
+						},
+					}, nil).
+					AnyTimes()
+
+				return fields{
+					traceRepo:      mockRepo,
+					buildHelper:    mockBuilder,
+					tenantProvider: mockTenantProvider,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID: 1,
+					StartTime:   time.Now().UnixMilli(),
+					Items: []*ListPreSpanItem{
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-1",
+							PreviousResponseID: "prev-resp-1",
+						},
+					},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanBatchResp{
+				Results: []*ListPreSpanResult{
+					{
+						TraceID:            "trace-1",
+						SpanID:             "span-1",
+						PreviousResponseID: "prev-resp-1",
+						Error:              errorx.NewByCode(obErrorx.CommercialCommonInvalidParamCodeCode),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "multiple items with same previous_response_id - should hit local cache",
+			fieldsGetter: func(ctrl *gomock.Controller) fields {
+				mockRepo := repomocks.NewMockITraceRepo(ctrl)
+				mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+				mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+				mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+				mockTenantProvider.EXPECT().
+					GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+					Return([]string{"tenant1"}, nil)
+
+				mockRepo.EXPECT().
+					GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{
+						PreRespID: "shared-prev-resp",
+					}).
+					Return([]string{"span-0"}, []string{"resp-0"}, nil).
+					Times(1)
+
+				mockRepo.EXPECT().
+					ListSpans(gomock.Any(), gomock.Any()).
+					Return(&repo.ListSpansResult{
+						Spans: []*loop_span.Span{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-0",
+								},
+							},
+							{
+								SpanID:      "span-1",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-1",
+									keyPreviousResponseID: "shared-prev-resp",
+								},
+							},
+							{
+								SpanID:      "span-2",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID:         "resp-2",
+									keyPreviousResponseID: "shared-prev-resp",
+								},
+							},
+						},
+					}, nil).
+					AnyTimes()
+
+				return fields{
+					traceRepo:      mockRepo,
+					buildHelper:    mockBuilder,
+					tenantProvider: mockTenantProvider,
+				}
+			},
+			args: args{
+				ctx: context.Background(),
+				req: &ListPreSpanBatchReq{
+					WorkspaceID: 1,
+					StartTime:   time.Now().UnixMilli(),
+					Items: []*ListPreSpanItem{
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-1",
+							PreviousResponseID: "shared-prev-resp",
+						},
+						{
+							TraceID:            "trace-1",
+							SpanID:             "span-2",
+							PreviousResponseID: "shared-prev-resp",
+						},
+					},
+					PlatformType: loop_span.PlatformCozeLoop,
+				},
+			},
+			want: &ListPreSpanBatchResp{
+				Results: []*ListPreSpanResult{
+					{
+						TraceID:            "trace-1",
+						SpanID:             "span-1",
+						PreviousResponseID: "shared-prev-resp",
+						Spans: loop_span.SpanList{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-0",
+								},
+							},
+						},
+						Error: nil,
+					},
+					{
+						TraceID:            "trace-1",
+						SpanID:             "span-2",
+						PreviousResponseID: "shared-prev-resp",
+						Spans: loop_span.SpanList{
+							{
+								SpanID:      "span-0",
+								TraceID:     "trace-1",
+								WorkspaceID: "1",
+								SystemTagsString: map[string]string{
+									keyResponseID: "resp-0",
+								},
+							},
+						},
+						Error: nil,
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			fields := tt.fieldsGetter(ctrl)
+			r := &TraceServiceImpl{
+				traceRepo:      fields.traceRepo,
+				buildHelper:    fields.buildHelper,
+				tenantProvider: fields.tenantProvider,
+			}
+			got, err := r.ListPreSpanBatch(tt.args.ctx, tt.args.req)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+			assert.Equal(t, len(tt.want.Results), len(got.Results))
+			for i, wantResult := range tt.want.Results {
+				gotResult := got.Results[i]
+				assert.Equal(t, wantResult.TraceID, gotResult.TraceID)
+				assert.Equal(t, wantResult.SpanID, gotResult.SpanID)
+				assert.Equal(t, wantResult.PreviousResponseID, gotResult.PreviousResponseID)
+				if wantResult.Error != nil {
+					assert.Error(t, gotResult.Error)
+				} else {
+					assert.NoError(t, gotResult.Error)
+					assert.Equal(t, len(wantResult.Spans), len(gotResult.Spans))
+				}
+			}
+		})
+	}
+}
+
+func TestTraceServiceImpl_MergeHistoryMessagesByRespIDBatch(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty spans - noop", func(t *testing.T) {
+		r := &TraceServiceImpl{}
+		err := r.MergeHistoryMessagesByRespIDBatch(ctx, nil, loop_span.PlatformCozeLoop)
+		assert.NoError(t, err)
+	})
+
+	t.Run("non model spans - noop", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+		mockRepo := repomocks.NewMockITraceRepo(ctrl)
+		mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+		mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+		r := &TraceServiceImpl{
+			traceRepo:      mockRepo,
+			buildHelper:    mockBuilder,
+			tenantProvider: mockTenantProvider,
+		}
+
+		span := &loop_span.Span{
+			SpanID:   "span-1",
+			TraceID:  "trace-1",
+			SpanType: loop_span.SpanTypePrompt,
+			Input:    `{"messages":[{"role":"user","content":"cur"}]}`,
+			SystemTagsString: map[string]string{
+				keyPreviousResponseID: "prev-resp-1",
+			},
+		}
+		err := r.MergeHistoryMessagesByRespIDBatch(ctx, []*loop_span.Span{span}, loop_span.PlatformCozeLoop)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"messages":[{"role":"user","content":"cur"}]}`, span.Input)
+	})
+
+	t.Run("merge history messages successfully", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockRepo := repomocks.NewMockITraceRepo(ctrl)
+		mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+		mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+		mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+		mockTenantProvider.EXPECT().
+			GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+			Return([]string{"tenant1"}, nil)
+
+		mockRepo.EXPECT().
+			GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{PreRespID: "prev-resp-1"}).
+			Return([]string{"span-0"}, []string{"resp-0"}, nil)
+
+		mockRepo.EXPECT().
+			ListSpans(gomock.Any(), gomock.Any()).
+			Return(&repo.ListSpansResult{
+				Spans: []*loop_span.Span{
+					{
+						SpanID:      "span-0",
+						TraceID:     "trace-1",
+						WorkspaceID: "1",
+						Input:       `{"messages":[{"role":"system","content":"hist_in"}]}`,
+						Output:      `{"choices":[{"role":"assistant","content":"hist_out"}]}`,
+						SystemTagsString: map[string]string{
+							keyResponseID: "resp-0",
+						},
+					},
+					{
+						SpanID:      "span-1",
+						TraceID:     "trace-1",
+						WorkspaceID: "1",
+						SystemTagsString: map[string]string{
+							keyResponseID:         "resp-1",
+							keyPreviousResponseID: "prev-resp-1",
+						},
+					},
+				},
+			}, nil).
+			AnyTimes()
+
+		r := &TraceServiceImpl{
+			traceRepo:      mockRepo,
+			buildHelper:    mockBuilder,
+			tenantProvider: mockTenantProvider,
+		}
+
+		span := &loop_span.Span{
+			StartTime:   time.Now().UnixMilli(),
+			WorkspaceID: "1",
+			SpanID:      "span-1",
+			TraceID:     "trace-1",
+			SpanType:    loop_span.SpanTypeModel,
+			Input:       `{"messages":[{"role":"user","content":"cur"}]}`,
+			SystemTagsString: map[string]string{
+				keyPreviousResponseID: "prev-resp-1",
+			},
+		}
+
+		err := r.MergeHistoryMessagesByRespIDBatch(ctx, []*loop_span.Span{span}, loop_span.PlatformCozeLoop)
+		assert.NoError(t, err)
+
+		var m map[string]interface{}
+		assert.NoError(t, json.Unmarshal([]byte(span.Input), &m))
+		msgs, ok := m["messages"].([]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, 3, len(msgs))
+	})
+
+	t.Run("ListPreSpanBatch returns error - should return error", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockRepo := repomocks.NewMockITraceRepo(ctrl)
+		mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+		mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+		mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+		mockTenantProvider.EXPECT().
+			GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+			Return(nil, fmt.Errorf("tenant error"))
+
+		r := &TraceServiceImpl{
+			traceRepo:      mockRepo,
+			buildHelper:    mockBuilder,
+			tenantProvider: mockTenantProvider,
+		}
+
+		span := &loop_span.Span{
+			StartTime:   time.Now().UnixMilli(),
+			WorkspaceID: "1",
+			SpanID:      "span-1",
+			TraceID:     "trace-1",
+			SpanType:    loop_span.SpanTypeModel,
+			Input:       `{"messages":[{"role":"user","content":"cur"}]}`,
+			SystemTagsString: map[string]string{
+				keyPreviousResponseID: "prev-resp-1",
+			},
+		}
+
+		err := r.MergeHistoryMessagesByRespIDBatch(ctx, []*loop_span.Span{span}, loop_span.PlatformCozeLoop)
+		assert.Error(t, err)
+	})
+
+	t.Run("current span from request overrides CK data - should merge successfully", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockRepo := repomocks.NewMockITraceRepo(ctrl)
+		mockTenantProvider := tenantmocks.NewMockITenantProvider(ctrl)
+		mockFilterFactory := filtermocks.NewMockPlatformFilterFactory(ctrl)
+		mockBuilder := NewTraceFilterProcessorBuilder(mockFilterFactory, map[entity.ProcessorScene][]span_processor.Factory{entity.SceneGetTrace: {}, entity.SceneListSpans: {}, entity.SceneAdvanceInfo: {}, entity.SceneIngestTrace: {}, entity.SceneSearchTraceOApi: {}, entity.SceneListSpansOApi: {}})
+
+		mockTenantProvider.EXPECT().
+			GetTenantsByPlatformType(gomock.Any(), loop_span.PlatformCozeLoop).
+			Return([]string{"tenant1"}, nil)
+
+		mockRepo.EXPECT().
+			GetPreSpanIDs(gomock.Any(), &repo.GetPreSpanIDsParam{PreRespID: "prev-resp-1"}).
+			Return([]string{"span-0"}, []string{"resp-0"}, nil)
+
+		mockRepo.EXPECT().
+			ListSpans(gomock.Any(), gomock.Any()).
+			Return(&repo.ListSpansResult{
+				Spans: []*loop_span.Span{
+					{
+						SpanID:      "span-0",
+						TraceID:     "trace-1",
+						WorkspaceID: "1",
+						Input:       `{"messages":[{"role":"system","content":"hist_in"}]}`,
+						Output:      `{"choices":[{"role":"assistant","content":"hist_out"}]}`,
+						SystemTagsString: map[string]string{
+							keyResponseID: "resp-0",
+						},
+					},
+					{
+						SpanID:      "span-1",
+						TraceID:     "trace-1",
+						WorkspaceID: "1",
+						SystemTagsString: map[string]string{
+							keyResponseID:         "resp-1",
+							keyPreviousResponseID: "mismatch",
+						},
+					},
+				},
+			}, nil).
+			AnyTimes()
+
+		r := &TraceServiceImpl{
+			traceRepo:      mockRepo,
+			buildHelper:    mockBuilder,
+			tenantProvider: mockTenantProvider,
+		}
+
+		orig := `{"messages":[{"role":"user","content":"cur"}]}`
+		span := &loop_span.Span{
+			StartTime:   time.Now().UnixMilli(),
+			WorkspaceID: "1",
+			SpanID:      "span-1",
+			TraceID:     "trace-1",
+			SpanType:    loop_span.SpanTypeModel,
+			Input:       orig,
+			SystemTagsString: map[string]string{
+				keyPreviousResponseID: "prev-resp-1",
+			},
+		}
+
+		err := r.MergeHistoryMessagesByRespIDBatch(ctx, []*loop_span.Span{span}, loop_span.PlatformCozeLoop)
+		assert.NoError(t, err)
+
+		var inputMap map[string]interface{}
+		err = json.Unmarshal([]byte(span.Input), &inputMap)
+		assert.NoError(t, err)
+
+		msgs, ok := inputMap["messages"].([]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, 3, len(msgs))
+
+		msg0, _ := msgs[0].(map[string]interface{})
+		assert.Equal(t, "system", msg0["role"])
+		assert.Equal(t, "hist_in", msg0["content"])
+
+		msg1, _ := msgs[1].(map[string]interface{})
+		assert.Equal(t, "assistant", msg1["role"])
+		assert.Equal(t, "hist_out", msg1["content"])
+
+		msg2, _ := msgs[2].(map[string]interface{})
+		assert.Equal(t, "user", msg2["role"])
+		assert.Equal(t, "cur", msg2["content"])
 	})
 }

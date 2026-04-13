@@ -183,6 +183,21 @@ func (mr *MockIEvalTargetServiceMockRecorder) ExecuteTarget(ctx, spaceID, target
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExecuteTarget", reflect.TypeOf((*MockIEvalTargetService)(nil).ExecuteTarget), ctx, spaceID, targetID, targetVersionID, param, inputData)
 }
 
+// ExtractTrajectory mocks base method.
+func (m *MockIEvalTargetService) ExtractTrajectory(ctx context.Context, spaceID int64, traceID string, startTimeMS *int64) (*entity.Trajectory, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ExtractTrajectory", ctx, spaceID, traceID, startTimeMS)
+	ret0, _ := ret[0].(*entity.Trajectory)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ExtractTrajectory indicates an expected call of ExtractTrajectory.
+func (mr *MockIEvalTargetServiceMockRecorder) ExtractTrajectory(ctx, spaceID, traceID, startTimeMS any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExtractTrajectory", reflect.TypeOf((*MockIEvalTargetService)(nil).ExtractTrajectory), ctx, spaceID, traceID, startTimeMS)
+}
+
 // GenerateMockOutputData mocks base method.
 func (m *MockIEvalTargetService) GenerateMockOutputData(outputSchemas []*entity.ArgsSchema) (map[string]string, error) {
 	m.ctrl.T.Helper()
@@ -286,6 +301,34 @@ func (m *MockIEvalTargetService) GetRecordByID(ctx context.Context, spaceID, rec
 func (mr *MockIEvalTargetServiceMockRecorder) GetRecordByID(ctx, spaceID, recordID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRecordByID", reflect.TypeOf((*MockIEvalTargetService)(nil).GetRecordByID), ctx, spaceID, recordID)
+}
+
+// LoadRecordFullData mocks base method.
+func (m *MockIEvalTargetService) LoadRecordFullData(ctx context.Context, record *entity.EvalTargetRecord) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "LoadRecordFullData", ctx, record)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// LoadRecordFullData indicates an expected call of LoadRecordFullData.
+func (mr *MockIEvalTargetServiceMockRecorder) LoadRecordFullData(ctx, record any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadRecordFullData", reflect.TypeOf((*MockIEvalTargetService)(nil).LoadRecordFullData), ctx, record)
+}
+
+// LoadRecordOutputFields mocks base method.
+func (m *MockIEvalTargetService) LoadRecordOutputFields(ctx context.Context, record *entity.EvalTargetRecord, fieldKeys []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "LoadRecordOutputFields", ctx, record, fieldKeys)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// LoadRecordOutputFields indicates an expected call of LoadRecordOutputFields.
+func (mr *MockIEvalTargetServiceMockRecorder) LoadRecordOutputFields(ctx, record, fieldKeys any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadRecordOutputFields", reflect.TypeOf((*MockIEvalTargetService)(nil).LoadRecordOutputFields), ctx, record, fieldKeys)
 }
 
 // ReportInvokeRecords mocks base method.

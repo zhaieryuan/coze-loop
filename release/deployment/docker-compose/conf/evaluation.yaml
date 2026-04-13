@@ -1,3 +1,9 @@
+# 评测记录大对象存储配置：200KB 以下 RDS，200KB 以上 S3
+evaluation_record_storage:
+  providers:
+    - provider: 'RDS'
+      max_size: 204800
+
 expt_consumer_conf:
   space_expt_exec_conf:
     "7485314682719338497":
@@ -46,6 +52,14 @@ expt_export_csv_event_rmq:
   topic: 'expt_export_csv_event'
   consumer_group: 'expt_export_csv_event_cg'
   producer_group: 'expt_export_csv_event_pg'
+
+# ClickHouse table configuration
+clickhouse_table_config:
+  expt_turn_result_filter_table_name: 'expt_turn_result_filter'
+
+evaluator_management_space_config:
+  evaluator_template_space:
+    - "7565071389755228204"
 
 rate_limiter_conf:
   - key_expr: biz_key + string(space_id)
@@ -2238,3 +2252,6 @@ custom_code_evaluator_template_conf:
 
 expt_export_white_list:
   allow_all: true
+
+clickhouse_config:
+  expt_turn_result_filter_db_name: "cozeloop-clickhouse"

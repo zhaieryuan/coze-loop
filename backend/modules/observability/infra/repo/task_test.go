@@ -12,9 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
-	mysql "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/mysql"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/mysql"
 	mysqlconv "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/mysql/convertor"
 	mysqlmodel "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/mysql/gorm_gen/model"
+	"github.com/coze-dev/coze-loop/backend/pkg/mcache/byted"
 )
 
 type stubIDGenerator struct {
@@ -31,13 +32,13 @@ func (s stubIDGenerator) GenMultiIDs(context.Context, int) ([]int64, error) {
 }
 
 type stubTaskDao struct {
-	createTaskFunc         func(ctx context.Context, po *mysqlmodel.ObservabilityTask) (int64, error)
-	updateTaskFunc         func(ctx context.Context, po *mysqlmodel.ObservabilityTask) error
-	updateTaskWithOCCFunc  func(ctx context.Context, id int64, workspaceID int64, updateMap map[string]interface{}) error
-	deleteTaskFunc         func(ctx context.Context, id int64, workspaceID int64, userID string) error
-	getTaskFunc            func(ctx context.Context, id int64, workspaceID *int64, userID *string) (*mysqlmodel.ObservabilityTask, error)
-	listTasksFunc          func(ctx context.Context, param mysql.ListTaskParam) ([]*mysqlmodel.ObservabilityTask, int64, error)
-	getObjListWithTaskFunc func(ctx context.Context) ([]string, []string, []*mysqlmodel.ObservabilityTask, error)
+	createTaskFunc        func(ctx context.Context, po *mysqlmodel.ObservabilityTask) (int64, error)
+	updateTaskFunc        func(ctx context.Context, po *mysqlmodel.ObservabilityTask) error
+	updateTaskWithOCCFunc func(ctx context.Context, id int64, workspaceID int64, updateMap map[string]interface{}) error
+	deleteTaskFunc        func(ctx context.Context, id int64, workspaceID int64, userID string) error
+	getTaskFunc           func(ctx context.Context, id int64, workspaceID *int64, userID *string) (*mysqlmodel.ObservabilityTask, error)
+	listTasksFunc         func(ctx context.Context, param mysql.ListTaskParam) ([]*mysqlmodel.ObservabilityTask, int64, error)
+	listNonFinalTasksFunc func(ctx context.Context) ([]*mysqlmodel.ObservabilityTask, error)
 }
 
 func (s *stubTaskDao) CreateTask(ctx context.Context, po *mysqlmodel.ObservabilityTask) (int64, error) {
@@ -82,11 +83,11 @@ func (s *stubTaskDao) ListTasks(ctx context.Context, param mysql.ListTaskParam) 
 	return nil, 0, nil
 }
 
-func (s *stubTaskDao) GetObjListWithTask(ctx context.Context) ([]string, []string, []*mysqlmodel.ObservabilityTask, error) {
-	if s.getObjListWithTaskFunc != nil {
-		return s.getObjListWithTaskFunc(ctx)
+func (s *stubTaskDao) ListNonFinalTasks(ctx context.Context) ([]*mysqlmodel.ObservabilityTask, error) {
+	if s.listNonFinalTasksFunc != nil {
+		return s.listNonFinalTasksFunc(ctx)
 	}
-	return nil, nil, nil, nil
+	return nil, nil
 }
 
 type stubTaskRedisDao struct {
@@ -272,6 +273,7 @@ func TestTaskRepoImpl_CreateTask(t *testing.T) {
 				TaskRedisDao:    redisDao,
 				TaskRunRedisDao: stubTaskRunRedisDao{},
 				idGenerator:     tt.generator,
+				cache:           byted.NewLRUCache(1024),
 			}
 
 			var addCalled, setCalled bool
@@ -339,6 +341,7 @@ func TestTaskRepoImpl_UpdateTask(t *testing.T) {
 				TaskRunDao:      stubTaskRunDao{},
 				TaskRedisDao:    redisDao,
 				TaskRunRedisDao: stubTaskRunRedisDao{},
+				cache:           byted.NewLRUCache(1024),
 			}
 
 			var setCalled bool
@@ -393,6 +396,7 @@ func TestTaskRepoImpl_DeleteTask(t *testing.T) {
 				TaskRunDao:      stubTaskRunDao{},
 				TaskRedisDao:    redisDao,
 				TaskRunRedisDao: stubTaskRunRedisDao{},
+				cache:           byted.NewLRUCache(1024),
 			}
 
 			var removeCalled bool
@@ -413,6 +417,47 @@ func TestTaskRepoImpl_DeleteTask(t *testing.T) {
 			assert.Equal(t, tt.expectRemove, removeCalled)
 		})
 	}
+}
+
+func TestTaskRepoImpl_ListNonFinalTaskBySpaceID_Cache(t *testing.T) {
+	expected := []int64{1, 2, 3}
+	spaceID := "test_space"
+	callCount := 0
+
+	redisDao := &stubTaskRedisDao{}
+	redisDao.listNonFinalTaskFunc = func(ctx context.Context, sID string) ([]int64, error) {
+		callCount++
+		assert.Equal(t, spaceID, sID)
+		return expected, nil
+	}
+
+	repo := &TaskRepoImpl{
+		TaskRedisDao: redisDao,
+		cache:        byted.NewLRUCache(1024 * 1024),
+	}
+
+	// 1. First call - Cache miss, should call Redis
+	list1, err := repo.ListNonFinalTaskBySpaceID(context.Background(), spaceID)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, list1)
+	assert.Equal(t, 1, callCount)
+
+	// 2. Second call - Cache hit, should NOT call Redis
+	list2, err := repo.ListNonFinalTaskBySpaceID(context.Background(), spaceID)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, list2)
+	assert.Equal(t, 1, callCount) // callCount stays 1
+
+	// 3. Different spaceID - Cache miss
+	anotherSpaceID := "other_space"
+	redisDao.listNonFinalTaskFunc = func(ctx context.Context, sID string) ([]int64, error) {
+		callCount++
+		return []int64{4, 5}, nil
+	}
+	list3, err := repo.ListNonFinalTaskBySpaceID(context.Background(), anotherSpaceID)
+	assert.NoError(t, err)
+	assert.Equal(t, []int64{4, 5}, list3)
+	assert.Equal(t, 2, callCount)
 }
 
 func TestTaskRepoImpl_NonFinalTaskWrappers(t *testing.T) {
@@ -441,9 +486,10 @@ func TestTaskRepoImpl_NonFinalTaskWrappers(t *testing.T) {
 		TaskRunDao:      stubTaskRunDao{},
 		TaskRedisDao:    redisDao,
 		TaskRunRedisDao: stubTaskRunRedisDao{},
+		cache:           byted.NewLRUCache(1024),
 	}
 
-	list, err := repo.ListNonFinalTask(context.Background(), "space")
+	list, err := repo.ListNonFinalTaskBySpaceID(context.Background(), "space")
 	assert.NoError(t, err)
 	assert.Equal(t, expected, list)
 
@@ -540,6 +586,7 @@ func TestTaskRepoImpl_GetTaskByRedis(t *testing.T) {
 				TaskRunDao:      stubTaskRunDao{},
 				TaskRedisDao:    redisDao,
 				TaskRunRedisDao: stubTaskRunRedisDao{},
+				cache:           byted.NewLRUCache(1024),
 			}
 
 			var mysqlCalled, setCalled bool
@@ -558,7 +605,7 @@ func TestTaskRepoImpl_GetTaskByRedis(t *testing.T) {
 				}
 			}
 
-			got, err := repo.GetTaskByRedis(context.Background(), 100)
+			got, err := repo.GetTaskByCache(context.Background(), 100)
 			if tt.expectErr != nil {
 				assert.EqualError(t, err, tt.expectErr.Error())
 			} else {
@@ -569,24 +616,4 @@ func TestTaskRepoImpl_GetTaskByRedis(t *testing.T) {
 			assert.Equal(t, tt.expectResult, got)
 		})
 	}
-}
-
-func TestTaskRepoImpl_SetTask(t *testing.T) {
-	t.Parallel()
-
-	called := false
-	redisDao := &stubTaskRedisDao{setTaskFunc: func(ctx context.Context, task *entity.ObservabilityTask) error {
-		called = true
-		assert.Equal(t, int64(1), task.ID)
-		return nil
-	}}
-	repo := &TaskRepoImpl{
-		TaskDao:         &stubTaskDao{},
-		TaskRunDao:      stubTaskRunDao{},
-		TaskRedisDao:    redisDao,
-		TaskRunRedisDao: stubTaskRunRedisDao{},
-	}
-
-	assert.NoError(t, repo.SetTask(context.Background(), &entity.ObservabilityTask{ID: 1}))
-	assert.True(t, called)
 }

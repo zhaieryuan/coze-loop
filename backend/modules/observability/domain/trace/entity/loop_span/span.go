@@ -16,7 +16,9 @@ import (
 	"github.com/coze-dev/coze-loop/backend/pkg/json"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/conv"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/ptr"
+	"github.com/coze-dev/coze-loop/backend/pkg/lang/slices"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
+	time_util "github.com/coze-dev/coze-loop/backend/pkg/time"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 )
@@ -53,6 +55,8 @@ const (
 	SpanFieldUserID                  = "user_id"
 	SpanFieldPromptKey               = "prompt_key"
 	SpanFieldTenant                  = "tenant"
+	SpanFieldKeyPreviousResponseID   = "previous_response_id"
+	SpanFieldKeyResponseID           = "response_id"
 
 	SpanTypePrompt          = "prompt"
 	SpanTypeModel           = "model"
@@ -77,6 +81,8 @@ const (
 	MaxKeySize         = 100
 	MaxTextSize        = 1024 * 1024
 	MaxCommonValueSize = 1024
+
+	CallTypeEvaluator = "Evaluator"
 )
 
 type TTL string
@@ -132,7 +138,8 @@ type Span struct {
 
 	AttrTos         *AttrTos       `json:"-"`
 	LogicDeleteTime int64          `json:"-"` // us
-	Annotations     AnnotationList `json:"-"`
+	Annotations     AnnotationList `json:"annotations"`
+	Encryption      EncryptionInfo `json:"-"`
 }
 
 type ObjectStorage struct {
@@ -158,6 +165,10 @@ type AttrTos struct {
 	InputDataURL   string
 	OutputDataURL  string
 	MultimodalData map[string]string
+}
+
+type EncryptionInfo struct {
+	NeedWorkflow bool
 }
 
 func (s *Span) GetSystemTags() map[string]string {
@@ -189,6 +200,106 @@ func (s *Span) GetCustomTags() map[string]string {
 		ret[tag.GetKey()] = tagStr
 	}
 	return ret
+}
+
+type StringWrapper struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	Type    string `json:"type"`
+}
+
+func (s *Span) IsResponseAPISpan() bool {
+	if s.SpanType != SpanTypeModel {
+		return false
+	}
+	if s.SystemTagsString == nil {
+		return false
+	}
+	v, ok := s.SystemTagsString[SpanFieldKeyPreviousResponseID]
+	return ok && v != ""
+}
+
+func (s *Span) MergeHistoryContext(ctx context.Context, historySpans []*Span) {
+	// Normalize func for Response API String|List Message structure
+	normalizeMessages := func(v interface{}, role string, t string) ([]interface{}, bool) {
+		switch vv := v.(type) {
+		case []interface{}:
+			return vv, true
+		case string:
+			if vv == "" {
+				return nil, false
+			}
+			return []interface{}{StringWrapper{Role: role, Content: vv, Type: t}}, true
+		default:
+			return nil, false
+		}
+	}
+
+	var currentInputMap map[string]interface{}
+	if err := sonic.UnmarshalString(s.Input, &currentInputMap); err != nil {
+		logs.CtxWarn(ctx, "fail to trans input %s into map", s.Input)
+		return
+	}
+
+	if s.SystemTagsString == nil {
+		s.SystemTagsString = make(map[string]string)
+	}
+	// 同一个 span 命中多个 subscriber 幂等
+	if s.SystemTagsString["_history_merged"] == "true" {
+		logs.CtxInfo(ctx, "history context already merged, skip")
+		return
+	}
+
+	logs.CtxInfo(ctx, "start to merge history context")
+
+	var historyMessages []interface{}
+	for _, preSpan := range historySpans {
+		if preSpan.Input != "" {
+			var inputMap map[string]interface{}
+			if err := sonic.UnmarshalString(preSpan.Input, &inputMap); err == nil {
+				if msgs, ok := inputMap["messages"].([]interface{}); ok {
+					historyMessages = append(historyMessages, msgs...)
+				} else if msgs, ok := normalizeMessages(inputMap["input"], "user", "message"); ok {
+					historyMessages = append(historyMessages, msgs...)
+				}
+			}
+		}
+		if preSpan.Output != "" {
+			var outputMap map[string]interface{}
+			if err := sonic.UnmarshalString(preSpan.Output, &outputMap); err == nil {
+				if msgs, ok := outputMap["choices"].([]interface{}); ok {
+					historyMessages = append(historyMessages, msgs...)
+				} else if msgs, ok := normalizeMessages(outputMap["output"], "assistant", "message"); ok {
+					historyMessages = append(historyMessages, msgs...)
+				}
+			}
+		}
+	}
+
+	if len(historyMessages) == 0 {
+		return
+	}
+
+	// fill into current span input map
+	if msgs, ok := currentInputMap["messages"].([]interface{}); ok {
+		currentInputMap["messages"] = append(historyMessages, msgs...)
+	} else if msgs, ok := normalizeMessages(currentInputMap["input"], "user", "message"); ok {
+		currentInputMap["input"] = append(historyMessages, msgs...)
+	} else {
+		currentInputMap["input"] = historyMessages
+	}
+
+	newInput, err := sonic.Marshal(currentInputMap)
+	if err != nil {
+		logs.CtxWarn(ctx, "fail to marshal new input, err:%v", err)
+		return
+	}
+	s.Input = string(newInput)
+	s.SystemTagsString["_history_merged"] = "true"
+}
+
+func (s *Span) IsModelSpan() bool {
+	return s.SpanType == SpanTypeModel
 }
 
 func (s *Span) getTags() []*Tag {
@@ -298,6 +409,33 @@ func (s *Span) GetFieldValue(fieldName string, isSystem, isCustom bool) any {
 	} else if val, ok := s.TagsByte[fieldName]; ok {
 		return val
 	}
+	annotationMap := make(map[string]AnnotationValue)
+	for _, annotation := range s.Annotations {
+		var prefix string
+		switch annotation.AnnotationType {
+		case AnnotationTypeOpenAPIFeedback:
+			prefix = AnnotationOpenAPIFeedbackFieldPrefix
+		case AnnotationTypeManualFeedback:
+			prefix = AnnotationManualFeedbackFieldPrefix
+		default:
+			continue
+		}
+		annotationMap[fmt.Sprintf("%s%s", prefix, annotation.Key)] = annotation.Value
+	}
+	if val, ok := annotationMap[fieldName]; ok {
+		switch val.ValueType {
+		case AnnotationValueTypeLong:
+			return val.LongValue
+		case AnnotationValueTypeDouble, AnnotationValueTypeNumber:
+			return val.FloatValue
+		case AnnotationValueTypeBool:
+			return val.BoolValue
+		case AnnotationValueTypeString:
+			return val.StringValue
+		default:
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -364,7 +502,7 @@ func (s *Span) GetTTL(ctx context.Context) TTL {
 	duration := tEnd.Sub(tStart)
 	days := int64(duration.Hours() / 24)
 	ttl := TTLFromInteger(days)
-	logs.CtxInfo(ctx, "get ttl for span_id %s is %s", s.SpanID, ttl)
+	logs.CtxDebug(ctx, "get ttl for span_id %s is %s", s.SpanID, ttl)
 	return ttl
 }
 
@@ -391,6 +529,7 @@ func (s *Span) BuildFeedback(t AnnotationType, key string, value AnnotationValue
 	if err := a.GenID(); err != nil {
 		return nil, fmt.Errorf("fail to generate annotation id: %v", err)
 	}
+	s.AddAnnotation(a)
 	return a, nil
 }
 
@@ -425,7 +564,48 @@ func (s *Span) AddManualDatasetAnnotation(datasetID int64, userID string, annota
 	return a, nil
 }
 
+func (s *Span) AddAutoEvalAnnotation(taskID, evaluatorRecordID, evaluatorVersionID int64, score float64, reasoning, userID string) (*Annotation, error) {
+	a := &Annotation{}
+	a.SpanID = s.SpanID
+	a.TraceID = s.TraceID
+	a.StartTime = time.UnixMicro(s.StartTime)
+	a.WorkspaceID = s.WorkspaceID
+	a.AnnotationType = AnnotationTypeAutoEvaluate
+	a.Key = fmt.Sprintf("%d:%d", taskID, evaluatorVersionID)
+	a.Value = NewDoubleValue(score)
+	a.Reasoning = reasoning
+	a.Metadata = &AutoEvaluateMetadata{
+		TaskID:             taskID,
+		EvaluatorRecordID:  evaluatorRecordID,
+		EvaluatorVersionID: evaluatorVersionID,
+	}
+	a.Status = AnnotationStatusNormal
+	a.CreatedAt = time.Now()
+	a.CreatedBy = userID
+	a.UpdatedAt = time.Now()
+	a.UpdatedBy = userID
+
+	if err := a.GenID(); err != nil {
+		return nil, err
+	}
+
+	s.AddAnnotation(a)
+	return a, nil
+}
+
+// ExtractByJsonpath 从Span的Input/Output/Tags中提取数据，根据jsonpath返回结果。时间戳按毫秒返回。
+// 会递归解析嵌套的 JSON 字符串。
 func (s *Span) ExtractByJsonpath(ctx context.Context, key string, jsonpath string) (string, error) {
+	return s.extractByJsonpath(ctx, key, jsonpath, true)
+}
+
+// ExtractByJsonpathRaw 从Span的Input/Output/Tags中提取数据，根据jsonpath返回结果。时间戳按毫秒返回。
+// 不会递归解析嵌套的 JSON 字符串，保持原始格式。适用于 MultiPart 类型数据提取。
+func (s *Span) ExtractByJsonpathRaw(ctx context.Context, key string, jsonpath string) (string, error) {
+	return s.extractByJsonpath(ctx, key, jsonpath, false)
+}
+
+func (s *Span) extractByJsonpath(ctx context.Context, key string, jsonpath string, recursive bool) (string, error) {
 	jsonpath = strings.TrimPrefix(jsonpath, key)
 	jsonpath = strings.TrimPrefix(jsonpath, ".")
 	data := ""
@@ -436,6 +616,12 @@ func (s *Span) ExtractByJsonpath(ctx context.Context, key string, jsonpath strin
 	} else if strings.HasPrefix(key, "Tags.") {
 		key = strings.TrimPrefix(key, "Tags.")
 		tag := s.GetFieldValue(key, false, false)
+		if key == SpanFieldStartTime || key == SpanFieldDuration || key == SpanFieldLogicDeleteDate ||
+			slices.Contains(TimeTagSlice, key) {
+			if integer, ok := tag.(int64); ok {
+				tag = time_util.MicroSec2MillSec(integer)
+			}
+		}
 		data = conv.ToString(tag)
 	} else {
 		return "", errors.Errorf("unsupported mapping key: %s", key)
@@ -448,7 +634,10 @@ func (s *Span) ExtractByJsonpath(ctx context.Context, key string, jsonpath strin
 		return data, nil
 	}
 
-	return json.GetStringByJSONPathRecursively(data, jsonpath)
+	if recursive {
+		return json.GetStringByJSONPathRecursively(data, jsonpath)
+	}
+	return json.GetStringByJSONPath(data, jsonpath)
 }
 
 func validField(clipFields *[]string, key, value string) string {

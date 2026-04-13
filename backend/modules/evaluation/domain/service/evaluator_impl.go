@@ -6,6 +6,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,13 +17,14 @@ import (
 	"github.com/coze-dev/coze-loop/backend/infra/middleware/session"
 	"github.com/coze-dev/coze-loop/backend/infra/mq"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/consts"
+	"github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/component"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/component/idem"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/entity"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/repo"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/pkg/conf"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/pkg/errno"
+	"github.com/coze-dev/coze-loop/backend/modules/evaluation/pkg/utils"
 	"github.com/coze-dev/coze-loop/backend/pkg/errorx"
-	"github.com/coze-dev/coze-loop/backend/pkg/lang/ptr"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
 )
 
@@ -40,6 +43,8 @@ func NewEvaluatorServiceImpl(
 	idem idem.IdempotentService,
 	configer conf.IConfiger,
 	evaluatorSourceServices map[entity.EvaluatorType]EvaluatorSourceService,
+	plainRateLimiter repo.IPlainRateLimiter,
+	cConfiger component.IConfiger,
 ) EvaluatorService {
 	onceEvaluatorService.Do(func() {
 		singletonEvaluatorService = &EvaluatorServiceImpl{
@@ -51,6 +56,8 @@ func NewEvaluatorServiceImpl(
 			idem:                    idem,
 			configer:                configer,
 			evaluatorSourceServices: evaluatorSourceServices,
+			plainRateLimiter:        plainRateLimiter,
+			cConfiger:               cConfiger,
 		}
 	})
 	return singletonEvaluatorService
@@ -66,6 +73,9 @@ type EvaluatorServiceImpl struct {
 	idem                    idem.IdempotentService
 	configer                conf.IConfiger
 	evaluatorSourceServices map[entity.EvaluatorType]EvaluatorSourceService
+	plainRateLimiter        repo.IPlainRateLimiter
+
+	cConfiger component.IConfiger
 }
 
 // ListEvaluator 按查询条件查询 evaluator_version
@@ -122,11 +132,12 @@ func (e *EvaluatorServiceImpl) ListEvaluator(ctx context.Context, request *entit
 func buildListEvaluatorRequest(ctx context.Context, request *entity.ListEvaluatorRequest) (*repo.ListEvaluatorRequest, error) {
 	// 转换请求参数为repo层结构
 	req := &repo.ListEvaluatorRequest{
-		SpaceID:    request.SpaceID,
-		SearchName: request.SearchName,
-		CreatorIDs: request.CreatorIDs,
-		PageSize:   request.PageSize,
-		PageNum:    request.PageNum,
+		SpaceID:      request.SpaceID,
+		SearchName:   request.SearchName,
+		CreatorIDs:   request.CreatorIDs,
+		FilterOption: request.FilterOption, // 传递FilterOption
+		PageSize:     request.PageSize,
+		PageNum:      request.PageNum,
 	}
 	evaluatorType := make([]entity.EvaluatorType, 0, len(request.EvaluatorType))
 	evaluatorType = append(evaluatorType, request.EvaluatorType...)
@@ -153,6 +164,25 @@ func buildListEvaluatorRequest(ctx context.Context, request *entity.ListEvaluato
 	return req, nil
 }
 
+// ListEvaluatorTags 根据 tagType 聚合标签并按字母序排序
+func (e *EvaluatorServiceImpl) ListEvaluatorTags(ctx context.Context, tagType entity.EvaluatorTagKeyType) (map[entity.EvaluatorTagKey][]string, error) {
+	if tagType == 0 {
+		tagType = entity.EvaluatorTagKeyType_Evaluator
+	}
+	tags, err := e.evaluatorRepo.ListEvaluatorTags(ctx, tagType)
+	if err != nil {
+		return nil, err
+	}
+	for key, values := range tags {
+		if len(values) == 0 {
+			continue
+		}
+		sort.Strings(values)
+		tags[key] = values
+	}
+	return tags, nil
+}
+
 // BatchGetEvaluator 按 id 批量查询 evaluator草稿
 func (e *EvaluatorServiceImpl) BatchGetEvaluator(ctx context.Context, spaceID int64, evaluatorIDs []int64, includeDeleted bool) ([]*entity.Evaluator, error) {
 	return e.evaluatorRepo.BatchGetEvaluatorDraftByEvaluatorID(ctx, spaceID, evaluatorIDs, includeDeleted)
@@ -174,6 +204,249 @@ func (e *EvaluatorServiceImpl) GetEvaluator(ctx context.Context, spaceID, evalua
 	}
 
 	return drafts[0], nil
+}
+
+// GetBuiltinEvaluator 根据 evaluatorID 查询元信息，若为预置评估器则按 builtin_visible_version 组装返回
+// 非预置评估器或条件不满足时返回 nil
+func (e *EvaluatorServiceImpl) GetBuiltinEvaluator(ctx context.Context, evaluatorID int64) (*entity.Evaluator, error) {
+	if evaluatorID == 0 {
+		return nil, nil
+	}
+
+	// 0) 查询元信息以判断是否为预置评估器及其可见版本
+	metas, err := e.evaluatorRepo.BatchGetEvaluatorMetaByID(ctx, []int64{evaluatorID}, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(metas) == 0 || metas[0] == nil {
+		return nil, nil
+	}
+	meta := metas[0]
+	if !meta.Builtin || meta.BuiltinVisibleVersion == "" {
+		return nil, nil
+	}
+
+	// 1) 通过 (evaluator_id, builtin_visible_version) 获取对应版本
+	pairs := [][2]interface{}{{evaluatorID, meta.BuiltinVisibleVersion}}
+	versions, err := e.evaluatorRepo.BatchGetEvaluatorVersionsByEvaluatorIDAndVersions(ctx, pairs)
+	if err != nil {
+		return nil, err
+	}
+	if len(versions) == 0 {
+		return nil, nil
+	}
+
+	// 2) 回填 metas（元信息）到返回的版本实体根字段
+	v := versions[0]
+	if v != nil && meta != nil {
+		v.ID = meta.ID
+		v.SpaceID = meta.SpaceID
+		v.Name = meta.Name
+		v.Description = meta.Description
+		v.DraftSubmitted = meta.DraftSubmitted
+		v.EvaluatorType = meta.EvaluatorType
+		v.LatestVersion = meta.LatestVersion
+		v.Builtin = meta.Builtin
+		v.EvaluatorInfo = meta.EvaluatorInfo
+		v.BuiltinVisibleVersion = meta.BuiltinVisibleVersion
+		v.BoxType = meta.BoxType
+		v.Tags = meta.Tags
+	}
+
+	return v, nil
+}
+
+func (e *EvaluatorServiceImpl) ResolveBuiltinEvaluatorVisibleVersionID(ctx context.Context, evaluatorID int64, evaluatorName string) (int64, error) {
+	if evaluatorID == 0 && evaluatorName == "" {
+		return 0, errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("builtin_evaluator_id or builtin_evaluator_name is required"))
+	}
+
+	builtinSpaceIDs := e.configer.GetBuiltinEvaluatorSpaceConf(ctx)
+	if len(builtinSpaceIDs) == 0 {
+		return 0, nil
+	}
+	spaceIDs := make([]int64, 0, len(builtinSpaceIDs))
+	spaceIDSet := make(map[int64]struct{}, len(builtinSpaceIDs))
+	for _, sid := range builtinSpaceIDs {
+		if sid == "" {
+			continue
+		}
+		v, err := strconv.ParseInt(sid, 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		spaceIDs = append(spaceIDs, v)
+		spaceIDSet[v] = struct{}{}
+	}
+
+	var meta *entity.Evaluator
+	if evaluatorID > 0 {
+		metas, err := e.evaluatorRepo.BatchGetEvaluatorMetaByID(ctx, []int64{evaluatorID}, false)
+		if err != nil {
+			return 0, err
+		}
+		if len(metas) == 0 || metas[0] == nil {
+			return 0, nil
+		}
+		if _, ok := spaceIDSet[metas[0].SpaceID]; !ok {
+			return 0, nil
+		}
+		if evaluatorName != "" && metas[0].Name != evaluatorName {
+			return 0, errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("builtin_evaluator_id and builtin_evaluator_name mismatch"))
+		}
+		meta = metas[0]
+	} else {
+		for _, sid := range spaceIDs {
+			m, err := e.evaluatorRepo.GetEvaluatorMetaBySpaceIDAndName(ctx, sid, evaluatorName, false)
+			if err != nil {
+				return 0, err
+			}
+			if m == nil {
+				continue
+			}
+			meta = m
+			break
+		}
+		if meta == nil {
+			return 0, nil
+		}
+	}
+
+	if !meta.Builtin || meta.BuiltinVisibleVersion == "" {
+		return 0, nil
+	}
+
+	pairs := [][2]interface{}{{meta.ID, meta.BuiltinVisibleVersion}}
+	versions, err := e.evaluatorRepo.BatchGetEvaluatorVersionsByEvaluatorIDAndVersions(ctx, pairs)
+	if err != nil {
+		return 0, err
+	}
+	if len(versions) == 0 || versions[0] == nil {
+		return 0, nil
+	}
+	return versions[0].GetEvaluatorVersionID(), nil
+}
+
+// BatchGetBuiltinEvaluator 批量获取预置评估器（visible版本）
+func (e *EvaluatorServiceImpl) BatchGetBuiltinEvaluator(ctx context.Context, evaluatorIDs []int64) ([]*entity.Evaluator, error) {
+	if len(evaluatorIDs) == 0 {
+		return []*entity.Evaluator{}, nil
+	}
+	// 批量获取元信息
+	metas, err := e.evaluatorRepo.BatchGetEvaluatorMetaByID(ctx, evaluatorIDs, false)
+	if err != nil {
+		return nil, err
+	}
+	// 组装 (evaluator_id, builtin_visible_version) 对
+	pairs := make([][2]interface{}, 0, len(metas))
+	for _, meta := range metas {
+		if meta == nil || !meta.Builtin || meta.BuiltinVisibleVersion == "" {
+			continue
+		}
+		pairs = append(pairs, [2]interface{}{meta.ID, meta.BuiltinVisibleVersion})
+	}
+	if len(pairs) == 0 {
+		return []*entity.Evaluator{}, nil
+	}
+	// 一次性批量获取版本
+	versions, err := e.evaluatorRepo.BatchGetEvaluatorVersionsByEvaluatorIDAndVersions(ctx, pairs)
+	if err != nil {
+		return nil, err
+	}
+
+	// 回填 metas（元信息）到各版本实体根字段
+	id2Meta := make(map[int64]*entity.Evaluator, len(metas))
+	for _, m := range metas {
+		if m != nil {
+			id2Meta[m.ID] = m
+		}
+	}
+	for _, v := range versions {
+		if v == nil {
+			continue
+		}
+		mid := v.GetEvaluatorID()
+		if m, ok := id2Meta[mid]; ok && m != nil {
+			v.ID = m.ID
+			v.SpaceID = m.SpaceID
+			v.Name = m.Name
+			v.Description = m.Description
+			v.DraftSubmitted = m.DraftSubmitted
+			v.EvaluatorType = m.EvaluatorType
+			v.LatestVersion = m.LatestVersion
+			v.Builtin = m.Builtin
+			v.EvaluatorInfo = m.EvaluatorInfo
+			v.BuiltinVisibleVersion = m.BuiltinVisibleVersion
+			v.BoxType = m.BoxType
+			v.Tags = m.Tags
+		}
+	}
+	return versions, nil
+}
+
+// BatchGetEvaluatorByIDAndVersion 批量根据 (evaluator_id, version) 查询具体版本
+func (e *EvaluatorServiceImpl) BatchGetEvaluatorByIDAndVersion(ctx context.Context, pairs [][2]interface{}) ([]*entity.Evaluator, error) {
+	if len(pairs) == 0 {
+		return []*entity.Evaluator{}, nil
+	}
+	versions, err := e.evaluatorRepo.BatchGetEvaluatorVersionsByEvaluatorIDAndVersions(ctx, pairs)
+	if err != nil {
+		return nil, err
+	}
+	if len(versions) == 0 {
+		return versions, nil
+	}
+
+	// 收集 evaluator 元信息并回填至版本实体根字段
+	evaluatorIDs := make([]int64, 0, len(versions))
+	seen := make(map[int64]struct{}, len(versions))
+	for _, v := range versions {
+		if v == nil {
+			continue
+		}
+		mid := v.GetEvaluatorID()
+		if mid == 0 {
+			continue
+		}
+		if _, ok := seen[mid]; ok {
+			continue
+		}
+		seen[mid] = struct{}{}
+		evaluatorIDs = append(evaluatorIDs, mid)
+	}
+	if len(evaluatorIDs) == 0 {
+		return versions, nil
+	}
+	metas, err := e.evaluatorRepo.BatchGetEvaluatorMetaByID(ctx, evaluatorIDs, false)
+	if err != nil {
+		return nil, err
+	}
+	id2Meta := make(map[int64]*entity.Evaluator, len(metas))
+	for _, m := range metas {
+		if m != nil {
+			id2Meta[m.ID] = m
+		}
+	}
+	for _, v := range versions {
+		if v == nil {
+			continue
+		}
+		if m, ok := id2Meta[v.GetEvaluatorID()]; ok && m != nil {
+			v.ID = m.ID
+			v.SpaceID = m.SpaceID
+			v.Name = m.Name
+			v.Description = m.Description
+			v.DraftSubmitted = m.DraftSubmitted
+			v.EvaluatorType = m.EvaluatorType
+			v.LatestVersion = m.LatestVersion
+			v.Builtin = m.Builtin
+			v.EvaluatorInfo = m.EvaluatorInfo
+			v.BuiltinVisibleVersion = m.BuiltinVisibleVersion
+			v.BoxType = m.BoxType
+			v.Tags = m.Tags
+		}
+	}
+	return versions, nil
 }
 
 // CreateEvaluator 创建 evaluator_version
@@ -200,6 +473,11 @@ func (e *EvaluatorServiceImpl) makeCreateIdemKey(cid string) string {
 	return consts.IdemKeyCreateEvaluator + cid
 }
 
+// nolint:unused // 保留备用：内置评估器创建的幂等键构造
+func (e *EvaluatorServiceImpl) makeCreateBuiltinIdemKey(cid string) string {
+	return consts.IdemKeyCreateEvaluator + "_builtin_" + cid
+}
+
 // 校验CreateEvaluator参数合法性
 func (e *EvaluatorServiceImpl) validateCreateEvaluatorRequest(ctx context.Context, evaluator *entity.Evaluator) error {
 	// 校验参数是否为空
@@ -219,20 +497,48 @@ func (e *EvaluatorServiceImpl) validateCreateEvaluatorRequest(ctx context.Contex
 			return errorx.NewByCode(errno.EvaluatorNameExistCode)
 		}
 	}
+	if _, ok := entity.EvaluatorTypeSet[evaluator.EvaluatorType]; !ok {
+		return errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("invalid evaluator type"))
+	}
+	switch evaluator.EvaluatorType {
+	case entity.EvaluatorTypePrompt:
+		if evaluator.PromptEvaluatorVersion == nil {
+			return errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("prompt evaluator version is required"))
+		}
+	case entity.EvaluatorTypeCode:
+		if evaluator.CodeEvaluatorVersion == nil {
+			return errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("code evaluator version is required"))
+		}
+	case entity.EvaluatorTypeCustomRPC:
+		if evaluator.CustomRPCEvaluatorVersion == nil {
+			return errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("custom rpc evaluator version is required"))
+		}
+	case entity.EvaluatorTypeAgent:
+		if evaluator.AgentEvaluatorVersion == nil {
+			return errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("agent evaluator version is required"))
+		}
+	}
 	return nil
 }
 
 // UpdateEvaluatorMeta 修改 evaluator_version
-func (e *EvaluatorServiceImpl) UpdateEvaluatorMeta(ctx context.Context, id, spaceID int64, name, description, userID string) error {
-	validateErr := e.validateUpdateEvaluatorMetaRequest(ctx, id, spaceID, name)
-	if validateErr != nil {
-		return validateErr
+func (e *EvaluatorServiceImpl) UpdateEvaluatorMeta(ctx context.Context, req *entity.UpdateEvaluatorMetaRequest) error {
+	if req == nil {
+		return errorx.NewByCode(errno.CommonInvalidParamCode)
 	}
-
-	if err := e.evaluatorRepo.UpdateEvaluatorMeta(ctx, id, name, description, userID); err != nil {
+	name := ""
+	if req.Name != nil {
+		name = *req.Name
+	}
+	if err := e.validateUpdateEvaluatorMetaRequest(ctx, req.ID, req.SpaceID, name); err != nil {
 		return err
 	}
-	return nil
+	return e.evaluatorRepo.UpdateEvaluatorMeta(ctx, req)
+}
+
+// UpdateBuiltinEvaluatorTags 根据 evaluatorID 全量对齐标签（多语言）
+func (e *EvaluatorServiceImpl) UpdateBuiltinEvaluatorTags(ctx context.Context, evaluatorID int64, tags map[entity.EvaluatorTagLangType]map[entity.EvaluatorTagKey][]string) error {
+	return e.evaluatorRepo.UpdateEvaluatorTags(ctx, evaluatorID, tags)
 }
 
 // 校验UpdateEvaluator参数合法性
@@ -312,9 +618,9 @@ func buildListEvaluatorVersionRequest(ctx context.Context, request *entity.ListE
 }
 
 // GetEvaluatorVersion 按 id 和版本号单个查询 evaluator_version version
-func (e *EvaluatorServiceImpl) GetEvaluatorVersion(ctx context.Context, evaluatorVersionID int64, includeDeleted bool) (*entity.Evaluator, error) {
-	// 获取 evaluator_version 元信息和版本内容
-	evaluatorDOList, err := e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, nil, []int64{evaluatorVersionID}, includeDeleted)
+func (e *EvaluatorServiceImpl) GetEvaluatorVersion(ctx context.Context, spaceID *int64, evaluatorVersionID int64, includeDeleted, withTags bool) (*entity.Evaluator, error) {
+	// 合并调用，根据 withTags 控制是否回填 tags
+	evaluatorDOList, err := e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, spaceID, []int64{evaluatorVersionID}, includeDeleted, withTags)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +631,8 @@ func (e *EvaluatorServiceImpl) GetEvaluatorVersion(ctx context.Context, evaluato
 }
 
 func (e *EvaluatorServiceImpl) BatchGetEvaluatorVersion(ctx context.Context, spaceID *int64, evaluatorVersionIDs []int64, includeDeleted bool) ([]*entity.Evaluator, error) {
-	return e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, spaceID, evaluatorVersionIDs, includeDeleted)
+	// 非builtin场景
+	return e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, spaceID, evaluatorVersionIDs, includeDeleted, false)
 }
 
 // SubmitEvaluatorVersion 提交 evaluator_version 版本
@@ -390,9 +697,31 @@ func (e *EvaluatorServiceImpl) makeSubmitIdemKey(cid string) string {
 	return consts.IdemKeySubmitEvaluator + cid
 }
 
+// roundEvaluatorOutputScore 统一处理评估器输出数据中的分数，保留两位小数
+func roundEvaluatorOutputScore(outputData *entity.EvaluatorOutputData) {
+	if outputData == nil {
+		return
+	}
+	if outputData.EvaluatorResult == nil {
+		return
+	}
+	// 处理原始分数
+	if outputData.EvaluatorResult.Score != nil {
+		roundedScore := utils.RoundScoreToTwoDecimals(*outputData.EvaluatorResult.Score)
+		outputData.EvaluatorResult.Score = &roundedScore
+	}
+	// 处理修正分数
+	if outputData.EvaluatorResult.Correction != nil && outputData.EvaluatorResult.Correction.Score != nil {
+		roundedScore := utils.RoundScoreToTwoDecimals(*outputData.EvaluatorResult.Correction.Score)
+		outputData.EvaluatorResult.Correction.Score = &roundedScore
+	}
+}
+
 // RunEvaluator evaluator_version 运行
 func (e *EvaluatorServiceImpl) RunEvaluator(ctx context.Context, request *entity.RunEvaluatorRequest) (*entity.EvaluatorRecord, error) {
-	evaluatorDOList, err := e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, ptr.Of(request.SpaceID), []int64{request.EvaluatorVersionID}, false)
+	logs.CtxInfo(ctx, "[RunEvaluator] RunEvaluator request: %v", request)
+	// 使用 BatchGetEvaluatorByVersionID 查询，不传 spaceID，允许查询所有空间的 evaluator
+	evaluatorDOList, err := e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, nil, []int64{request.EvaluatorVersionID}, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -400,18 +729,29 @@ func (e *EvaluatorServiceImpl) RunEvaluator(ctx context.Context, request *entity
 		return nil, errorx.NewByCode(errno.EvaluatorVersionNotFoundCode, errorx.WithExtraMsg("evaluator_version version not found"))
 	}
 	evaluatorDO := evaluatorDOList[0]
-	allow := e.limiter.AllowInvoke(ctx, request.SpaceID)
-	if !allow {
-		return nil, errorx.NewByCode(errno.EvaluatorQPSLimitCode)
+	// 如果是预置评估器（Builtin），直接执行后续流程
+	// 如果不是预置评估器，则根据 space_id 判断是否当前空间的 Evaluator
+	if !evaluatorDO.Builtin {
+		if evaluatorDO.SpaceID != request.SpaceID {
+			return nil, errorx.NewByCode(errno.EvaluatorVersionNotFoundCode, errorx.WithExtraMsg("evaluator_version not found in current space"))
+		}
+	}
+	if allow := e.limiter.AllowInvoke(ctx, request.SpaceID); !allow {
+		return nil, errorx.NewByCode(errno.EvaluatorQPSLimitCode, errorx.WithExtraMsg("evaluator throttled due to space-level rate limit"))
+	}
+	if allow := e.plainRateLimiter.AllowInvokeWithKeyLimit(ctx, fmt.Sprintf("run_evaluator:%v", evaluatorDO.ID), evaluatorDO.GetRateLimit()); !allow {
+		return nil, errorx.NewByCode(errno.EvaluatorQPSLimitCode, errorx.WithExtraMsg("evaluator throttled due to evaluator-level rate limit"))
 	}
 	evaluatorSourceService, ok := e.evaluatorSourceServices[evaluatorDO.EvaluatorType]
 	if !ok {
 		return nil, errorx.NewByCode(errno.EvaluatorNotExistCode)
 	}
-	if evaluatorSourceService.PreHandle(ctx, evaluatorDO) != nil {
+	if err = evaluatorSourceService.PreHandle(ctx, evaluatorDO); err != nil {
 		return nil, err
 	}
-	outputData, runStatus, traceID := evaluatorSourceService.Run(ctx, evaluatorDO, request.InputData, request.DisableTracing)
+	outputData, runStatus, traceID := evaluatorSourceService.Run(ctx, evaluatorDO, request.InputData, request.EvaluatorRunConf, request.SpaceID, request.DisableTracing)
+	// 统一处理评估器输出数据中的分数，保留两位小数
+	roundEvaluatorOutputScore(outputData)
 	if runStatus == entity.EvaluatorRunStatusFail {
 		logs.CtxWarn(ctx, "[RunEvaluator] Run fail, exptID: %d, exptRunID: %d, itemID: %d, turnID: %d, evaluatorVersionID: %d, traceID: %s, err: %v", request.ExperimentID, request.ExperimentRunID, request.ItemID, request.TurnID, request.EvaluatorVersionID, traceID, outputData.EvaluatorRunError)
 	}
@@ -442,6 +782,12 @@ func (e *EvaluatorServiceImpl) RunEvaluator(ctx context.Context, request *entity
 			},
 		},
 	}
+	if recordDO.EvaluatorOutputData != nil &&
+		recordDO.EvaluatorOutputData.EvaluatorRunError != nil &&
+		recordDO.EvaluatorOutputData.EvaluatorRunError.Code != int32(errno.CustomRPCEvaluatorRunFailedCode) &&
+		len(recordDO.EvaluatorOutputData.EvaluatorRunError.Message) > 0 {
+		recordDO.EvaluatorOutputData.EvaluatorRunError.Message = e.cConfiger.GetErrCtrl(ctx).ConvertErrMsg(recordDO.EvaluatorOutputData.EvaluatorRunError.Message)
+	}
 	err = e.evaluatorRecordRepo.CreateEvaluatorRecord(ctx, recordDO)
 	if err != nil {
 		return nil, err
@@ -449,8 +795,187 @@ func (e *EvaluatorServiceImpl) RunEvaluator(ctx context.Context, request *entity
 	return recordDO, nil
 }
 
+// AsyncRunEvaluator Agent evaluator_version 异步运行
+func (e *EvaluatorServiceImpl) AsyncRunEvaluator(ctx context.Context, request *entity.AsyncRunEvaluatorRequest) (*entity.EvaluatorRecord, error) {
+	evaluatorDOList, err := e.evaluatorRepo.BatchGetEvaluatorByVersionID(ctx, nil, []int64{request.EvaluatorVersionID}, false, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(evaluatorDOList) == 0 {
+		return nil, errorx.NewByCode(errno.EvaluatorVersionNotFoundCode, errorx.WithExtraMsg("evaluator_version version not found"))
+	}
+	evaluatorDO := evaluatorDOList[0]
+	if evaluatorDO.EvaluatorType != entity.EvaluatorTypeAgent {
+		return nil, errorx.NewByCode(errno.InvalidEvaluatorTypeCode, errorx.WithExtraMsg("async run only supports Agent evaluator type"))
+	}
+	if !evaluatorDO.Builtin {
+		if evaluatorDO.SpaceID != request.SpaceID {
+			return nil, errorx.NewByCode(errno.EvaluatorVersionNotFoundCode, errorx.WithExtraMsg("evaluator_version not found in current space"))
+		}
+	}
+	if allow := e.limiter.AllowInvoke(ctx, request.SpaceID); !allow {
+		return nil, errorx.NewByCode(errno.EvaluatorQPSLimitCode, errorx.WithExtraMsg("evaluator throttled due to space-level rate limit"))
+	}
+	if allow := e.plainRateLimiter.AllowInvokeWithKeyLimit(ctx, fmt.Sprintf("async_run_evaluator:%v", evaluatorDO.ID), evaluatorDO.GetRateLimit()); !allow {
+		return nil, errorx.NewByCode(errno.EvaluatorQPSLimitCode, errorx.WithExtraMsg("evaluator throttled due to evaluator-level rate limit"))
+	}
+	invokeID, err := e.idgen.GenID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	evaluatorSourceService, ok := e.evaluatorSourceServices[evaluatorDO.EvaluatorType]
+	if !ok {
+		return nil, errorx.NewByCode(errno.InvalidEvaluatorTypeCode, errorx.WithExtraMsg("evaluator source service not found for agent type"))
+	}
+	asyncRunExt, traceID, err := evaluatorSourceService.AsyncRun(ctx, evaluatorDO, request.InputData, request.EvaluatorRunConf, request.SpaceID, invokeID)
+	if err != nil {
+		logs.CtxError(ctx, "[AsyncRunEvaluator] AsyncRun fail, invokeID: %d, err: %v", invokeID, err)
+		return nil, err
+	}
+
+	userIDInContext := session.UserIDInCtxOrEmpty(ctx)
+	logID := logs.GetLogID(ctx)
+	status := entity.EvaluatorRunStatusAsyncInvoking
+	outputData := &entity.EvaluatorOutputData{
+		Ext: asyncRunExt,
+	}
+	recordDO := &entity.EvaluatorRecord{
+		ID:                  invokeID,
+		SpaceID:             request.SpaceID,
+		ExperimentID:        request.ExperimentID,
+		ExperimentRunID:     request.ExperimentRunID,
+		ItemID:              request.ItemID,
+		TurnID:              request.TurnID,
+		EvaluatorVersionID:  request.EvaluatorVersionID,
+		TraceID:             traceID,
+		LogID:               logID,
+		EvaluatorInputData:  request.InputData,
+		EvaluatorOutputData: outputData,
+		Status:              status,
+		Ext:                 request.Ext,
+		BaseInfo: &entity.BaseInfo{
+			CreatedBy: &entity.UserInfo{
+				UserID: gptr.Of(userIDInContext),
+			},
+			UpdatedBy: &entity.UserInfo{
+				UserID: gptr.Of(userIDInContext),
+			},
+			CreatedAt: gptr.Of(time.Now().UnixMilli()),
+			UpdatedAt: gptr.Of(time.Now().UnixMilli()),
+		},
+	}
+	if err := e.evaluatorRecordRepo.CreateEvaluatorRecord(ctx, recordDO); err != nil {
+		logs.CtxError(ctx, "[AsyncRunEvaluator] CreateEvaluatorRecord fail, invokeID: %d, err: %v", invokeID, err)
+		return nil, err
+	}
+
+	logs.CtxInfo(ctx, "[AsyncRunEvaluator] invokeID: %d, evaluatorVersionID: %d, spaceID: %d", invokeID, request.EvaluatorVersionID, request.SpaceID)
+	return recordDO, nil
+}
+
+// AsyncDebugEvaluator Agent evaluator_version 异步调试
+func (e *EvaluatorServiceImpl) AsyncDebugEvaluator(ctx context.Context, request *entity.AsyncDebugEvaluatorRequest) (*entity.AsyncDebugEvaluatorResponse, error) {
+	evaluatorDO := request.EvaluatorDO
+	if evaluatorDO == nil {
+		return nil, errorx.NewByCode(errno.EvaluatorNotExistCode, errorx.WithExtraMsg("evaluator is nil"))
+	}
+	if evaluatorDO.EvaluatorType != entity.EvaluatorTypeAgent {
+		return nil, errorx.NewByCode(errno.InvalidEvaluatorTypeCode, errorx.WithExtraMsg("async debug only supports Agent evaluator type"))
+	}
+	if allow := e.limiter.AllowInvoke(ctx, request.SpaceID); !allow {
+		return nil, errorx.NewByCode(errno.EvaluatorQPSLimitCode, errorx.WithExtraMsg("evaluator throttled due to space-level rate limit"))
+	}
+	invokeID, err := e.idgen.GenID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	evaluatorSourceService, ok := e.evaluatorSourceServices[evaluatorDO.EvaluatorType]
+	if !ok {
+		return nil, errorx.NewByCode(errno.InvalidEvaluatorTypeCode, errorx.WithExtraMsg("evaluator source service not found for agent type"))
+	}
+	asyncDebugExt, traceID, err := evaluatorSourceService.AsyncDebug(ctx, evaluatorDO, request.InputData, request.EvaluatorRunConf, request.SpaceID, invokeID)
+	if err != nil {
+		logs.CtxError(ctx, "[AsyncDebugEvaluator] AsyncDebug fail, invokeID: %d, err: %v", invokeID, err)
+		return nil, err
+	}
+
+	userIDInContext := session.UserIDInCtxOrEmpty(ctx)
+	logID := logs.GetLogID(ctx)
+	status := entity.EvaluatorRunStatusAsyncInvoking
+	outputData := &entity.EvaluatorOutputData{
+		Ext: asyncDebugExt,
+	}
+	recordDO := &entity.EvaluatorRecord{
+		ID:                  invokeID,
+		SpaceID:             request.SpaceID,
+		EvaluatorVersionID:  evaluatorDO.GetEvaluatorVersionID(),
+		TraceID:             traceID,
+		LogID:               logID,
+		EvaluatorInputData:  request.InputData,
+		EvaluatorOutputData: outputData,
+		Status:              status,
+		BaseInfo: &entity.BaseInfo{
+			CreatedBy: &entity.UserInfo{
+				UserID: gptr.Of(userIDInContext),
+			},
+			UpdatedBy: &entity.UserInfo{
+				UserID: gptr.Of(userIDInContext),
+			},
+			CreatedAt: gptr.Of(time.Now().UnixMilli()),
+			UpdatedAt: gptr.Of(time.Now().UnixMilli()),
+		},
+	}
+	if err := e.evaluatorRecordRepo.CreateEvaluatorRecord(ctx, recordDO); err != nil {
+		logs.CtxError(ctx, "[AsyncDebugEvaluator] CreateEvaluatorRecord fail, invokeID: %d, err: %v", invokeID, err)
+		return nil, err
+	}
+
+	logs.CtxInfo(ctx, "[AsyncDebugEvaluator] invokeID: %d, traceID: %s, spaceID: %d", invokeID, traceID, request.SpaceID)
+	return &entity.AsyncDebugEvaluatorResponse{
+		InvokeID: invokeID,
+		TraceID:  traceID,
+	}, nil
+}
+
+// ReportEvaluatorInvokeResult 上报评估器异步执行结果
+func (e *EvaluatorServiceImpl) ReportEvaluatorInvokeResult(ctx context.Context, param *entity.ReportEvaluatorRecordParam) error {
+	logs.CtxInfo(ctx, "[ReportEvaluatorInvokeResult] recordID: %d, spaceID: %d, status: %v", param.RecordID, param.SpaceID, param.Status)
+
+	existingRecord, err := e.evaluatorRecordRepo.GetEvaluatorRecord(ctx, param.RecordID, false)
+	if err != nil {
+		logs.CtxError(ctx, "[ReportEvaluatorInvokeResult] GetEvaluatorRecord fail, recordID: %d, err: %v", param.RecordID, err)
+		return err
+	}
+	if existingRecord == nil {
+		return errorx.NewByCode(errno.EvaluatorRecordNotFoundCode, errorx.WithExtraMsg("evaluator record not found"))
+	}
+
+	if existingRecord.SpaceID != param.SpaceID {
+		logs.CtxWarn(ctx, "[ReportEvaluatorInvokeResult] spaceID mismatch, recordID: %d, requestSpaceID: %d, recordSpaceID: %d",
+			param.RecordID, param.SpaceID, existingRecord.SpaceID)
+		return errorx.NewByCode(errno.CommonInvalidParamCode, errorx.WithExtraMsg("spaceID mismatch"))
+	}
+
+	mergedOutputData := param.OutputData
+	if mergedOutputData == nil {
+		mergedOutputData = &entity.EvaluatorOutputData{}
+	}
+	if existingRecord.EvaluatorOutputData != nil && existingRecord.EvaluatorOutputData.Ext != nil {
+		if mergedOutputData.Ext == nil {
+			mergedOutputData.Ext = make(map[string]string)
+		}
+		for k, v := range existingRecord.EvaluatorOutputData.Ext {
+			if _, exists := mergedOutputData.Ext[k]; !exists {
+				mergedOutputData.Ext[k] = v
+			}
+		}
+	}
+
+	return e.evaluatorRecordRepo.UpdateEvaluatorRecordResult(ctx, param.RecordID, param.Status, mergedOutputData)
+}
+
 // DebugEvaluator 调试 evaluator_version
-func (e *EvaluatorServiceImpl) DebugEvaluator(ctx context.Context, evaluatorDO *entity.Evaluator, inputData *entity.EvaluatorInputData) (*entity.EvaluatorOutputData, error) {
+func (e *EvaluatorServiceImpl) DebugEvaluator(ctx context.Context, evaluatorDO *entity.Evaluator, inputData *entity.EvaluatorInputData, evaluatorRunConf *entity.EvaluatorRunConfig, exptSpaceID int64) (*entity.EvaluatorOutputData, error) {
 	if evaluatorDO == nil || (evaluatorDO.EvaluatorType == entity.EvaluatorTypePrompt && evaluatorDO.PromptEvaluatorVersion == nil) {
 		return nil, errorx.NewByCode(errno.EvaluatorNotExistCode)
 	}
@@ -469,7 +994,14 @@ func (e *EvaluatorServiceImpl) DebugEvaluator(ctx context.Context, evaluatorDO *
 		return nil, err
 	}
 	// 3. 执行Debug
-	return evaluatorSourceService.Debug(ctx, evaluatorDO, inputData)
+	// exptSpaceID 目前不影响执行路径，预留透传用途
+	outputData, err := evaluatorSourceService.Debug(ctx, evaluatorDO, inputData, evaluatorRunConf, exptSpaceID)
+	if err != nil {
+		return nil, err
+	}
+	// 调试场景也统一对输出分数保留两位小数
+	roundEvaluatorOutputScore(outputData)
+	return outputData, nil
 }
 
 func (e *EvaluatorServiceImpl) CheckNameExist(ctx context.Context, spaceID, evaluatorID int64, name string) (bool, error) {
@@ -499,4 +1031,53 @@ func (e *EvaluatorServiceImpl) injectUserInfo(ctx context.Context, evaluatorDO *
 		CreatedAt: gptr.Of(time.Now().UnixMilli()),
 		UpdatedAt: gptr.Of(time.Now().UnixMilli()),
 	})
+}
+
+// ListBuiltinEvaluator 查询内置评估器
+func (e *EvaluatorServiceImpl) ListBuiltinEvaluator(ctx context.Context, request *entity.ListBuiltinEvaluatorRequest) ([]*entity.Evaluator, int64, error) {
+	// 构建ListBuiltinEvaluator请求
+	repoReq := &repo.ListBuiltinEvaluatorRequest{
+		FilterOption:   request.FilterOption, // 直接使用传入的FilterOption
+		PageSize:       request.PageSize,
+		PageNum:        request.PageNum,
+		IncludeDeleted: false, // 内置评估器不包含已删除的
+	}
+
+	// 调用repo层的ListBuiltinEvaluator方法
+	result, err := e.evaluatorRepo.ListBuiltinEvaluator(ctx, repoReq)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 通过 evaluator_id + BuiltinVisibleVersion 批量查询版本并回填
+	pairs := make([][2]interface{}, 0, len(result.Evaluators))
+	for _, ev := range result.Evaluators {
+		if ev == nil || ev.BuiltinVisibleVersion == "" {
+			continue
+		}
+		pairs = append(pairs, [2]interface{}{ev.ID, ev.BuiltinVisibleVersion})
+	}
+	if len(pairs) > 0 {
+		versions, err := e.evaluatorRepo.BatchGetEvaluatorVersionsByEvaluatorIDAndVersions(ctx, pairs)
+		if err != nil {
+			return nil, 0, err
+		}
+		// 建立 (evaluatorID, version) -> DO 映射
+		verMap := make(map[string]*entity.Evaluator, len(versions))
+		for _, ver := range versions {
+			key := strconv.FormatInt(ver.GetEvaluatorID(), 10) + "#" + ver.GetVersion()
+			verMap[key] = ver
+		}
+		// 回填
+		for _, ev := range result.Evaluators {
+			if ev == nil || ev.BuiltinVisibleVersion == "" {
+				continue
+			}
+			key := strconv.FormatInt(ev.ID, 10) + "#" + ev.BuiltinVisibleVersion
+			if v, ok := verMap[key]; ok {
+				ev.SetEvaluatorVersion(v)
+			}
+		}
+	}
+	return result.Evaluators, result.TotalCount, nil
 }

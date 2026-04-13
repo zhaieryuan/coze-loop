@@ -47,12 +47,17 @@ const (
 	FieldTypeDouble FieldType = "double"
 	FieldTypeBool   FieldType = "bool"
 
-	PlatformDefault    PlatformType = "default"
-	PlatformCozeLoop   PlatformType = "cozeloop"
-	PlatformPrompt     PlatformType = "prompt"
-	PlatformEvaluator  PlatformType = "evaluator"
-	PlatformEvalTarget PlatformType = "evaluation_target"
-	PlatformOpenAPI    PlatformType = "open_api"
+	PlatformDefault      PlatformType = "default"
+	PlatformCozeLoop     PlatformType = "cozeloop"
+	PlatformPrompt       PlatformType = "prompt"
+	PlatformEvaluator    PlatformType = "evaluator"
+	PlatformEvalTarget   PlatformType = "evaluation_target"
+	PlatformOpenAPI      PlatformType = "open_api"
+	PlatformCozeWorkflow PlatformType = "coze_workflow"
+	PlatformCozeBot      PlatformType = "coze_bot"
+	PlatformVeAgentKit   PlatformType = "ve_agentkit"
+	PlatformVeADK        PlatformType = "veadk"
+	PlatformCallbackAll  PlatformType = "callback_all"
 
 	SpanListTypeRootSpan SpanListType = "root_span"
 	SpanListTypeAllSpan  SpanListType = "all_span"
@@ -152,10 +157,6 @@ func (f *FilterFields) Traverse(fn func(f *FilterField) error) error {
 	return nil
 }
 
-//func (f *FilterFields) Filter[T FilterObject](objs []T) []T  {
-//
-//}
-
 func (f *FilterFields) Satisfied(obj FilterObject) bool {
 	op := QueryAndOrEnumAnd
 	hit := true
@@ -187,15 +188,16 @@ func (f *FilterFields) Debug() string {
 }
 
 type FilterField struct {
-	FieldName  string          `mapstructure:"field_name" json:"field_name"`
-	FieldType  FieldType       `mapstructure:"field_type" json:"field_type"`
-	Values     []string        `mapstructure:"values" json:"values"`
-	QueryType  *QueryTypeEnum  `mapstructure:"query_type" json:"query_type"`
-	QueryAndOr *QueryAndOrEnum `mapstructure:"query_and_or" json:"query_and_or"`
-	SubFilter  *FilterFields   `mapstructure:"sub_filter" json:"sub_filter"`
-	IsSystem   bool            `mapstructure:"is_system" json:"is_system"`
-	IsCustom   bool            `mapstructure:"is_custom" json:"is_custom"`
-	Hidden     bool            `mapstructure:"hidden" json:"hidden"`
+	FieldName  string            `mapstructure:"field_name" json:"field_name"`
+	FieldType  FieldType         `mapstructure:"field_type" json:"field_type"`
+	Values     []string          `mapstructure:"values" json:"values"`
+	QueryType  *QueryTypeEnum    `mapstructure:"query_type" json:"query_type"`
+	QueryAndOr *QueryAndOrEnum   `mapstructure:"query_and_or" json:"query_and_or"`
+	SubFilter  *FilterFields     `mapstructure:"sub_filter" json:"sub_filter"`
+	IsSystem   bool              `mapstructure:"is_system" json:"is_system"`
+	IsCustom   bool              `mapstructure:"is_custom" json:"is_custom"`
+	Hidden     bool              `mapstructure:"hidden" json:"hidden"`
+	ExtraInfo  map[string]string `mapstructure:"extra_info" json:"extra_info"`
 }
 
 func (f *FilterField) Validate() error {
@@ -361,6 +363,15 @@ func (f *FilterField) CheckValue(val any) bool {
 		return CompareBool(boolVal, vals, *f.QueryType)
 	default:
 		return false
+	}
+}
+
+func (f *FilterField) SetHidden(hidden bool) {
+	f.Hidden = hidden
+	if f.SubFilter != nil {
+		for _, subFilters := range f.SubFilter.FilterFields {
+			subFilters.SetHidden(hidden)
+		}
 	}
 }
 

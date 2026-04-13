@@ -12,24 +12,25 @@ import (
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
+	"github.com/coze-dev/coze-loop/backend/pkg/consts"
 	"github.com/coze-dev/coze-loop/backend/pkg/json"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/conv"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
 )
 
-type CallbackConsumer struct {
+type AutoTaskCallbackConsumer struct {
 	handler obapp.ITaskQueueConsumer
 	conf.IConfigLoader
 }
 
-func newCallbackConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
-	return &CallbackConsumer{
+func NewCallbackConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
+	return &AutoTaskCallbackConsumer{
 		handler:       handler,
 		IConfigLoader: loader,
 	}
 }
 
-func (e *CallbackConsumer) ConsumerCfg(ctx context.Context) (*mq.ConsumerConfig, error) {
+func (e *AutoTaskCallbackConsumer) ConsumerCfg(ctx context.Context) (*mq.ConsumerConfig, error) {
 	const key = "autotask_callback_mq_consumer_config"
 	cfg := &config.MqConsumerCfg{}
 	if err := e.UnmarshalKey(ctx, key, cfg); err != nil {
@@ -46,7 +47,8 @@ func (e *CallbackConsumer) ConsumerCfg(ctx context.Context) (*mq.ConsumerConfig,
 	return res, nil
 }
 
-func (e *CallbackConsumer) HandleMessage(ctx context.Context, ext *mq.MessageExt) error {
+func (e *AutoTaskCallbackConsumer) HandleMessage(ctx context.Context, ext *mq.MessageExt) error {
+	ctx = context.WithValue(ctx, consts.CtxKeyFlowMethodKey, "autotask_callback_consumer")
 	logID := logs.NewLogID()
 	ctx = logs.SetLogID(ctx, logID)
 	event := new(entity.AutoEvalEvent)
@@ -55,5 +57,5 @@ func (e *CallbackConsumer) HandleMessage(ctx context.Context, ext *mq.MessageExt
 		return nil
 	}
 	logs.CtxInfo(ctx, "Callback msg, event: %v，msgID: %s", event, ext.MsgID)
-	return e.handler.CallBack(ctx, event)
+	return e.handler.AutoEvalCallback(ctx, event)
 }

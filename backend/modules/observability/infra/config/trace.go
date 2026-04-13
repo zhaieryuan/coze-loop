@@ -13,19 +13,23 @@ import (
 )
 
 const (
-	systemViewsCfgKey          = "trace_system_view_cfg"
-	platformTenantCfgKey       = "trace_platform_tenants"
-	platformSpanHandlerCfgKey  = "trace_platform_span_handler_config"
-	traceIngestTenantCfgKey    = "trace_ingest_tenant_config"
-	annotationMqProducerCfgKey = "annotation_mq_producer_config"
-	tenantTablesCfgKey         = "trace_tenant_cfg"
-	traceCkCfgKey              = "trace_ck_cfg"
-	traceFieldMetaInfoCfgKey   = "trace_field_meta_info"
-	traceMaxDurationDay        = "trace_max_duration_day"
-	annotationSourceCfgKey     = "annotation_source_cfg"
-	queryTraceRateLimitCfgKey  = "query_trace_rate_limit_config"
-	keySpanTypeCfgKey          = "key_span_type"
-	backfillMqProducerCfgKey   = "backfill_mq_producer_config"
+	systemViewsCfgKey                  = "trace_system_view_cfg"
+	platformTenantCfgKey               = "trace_platform_tenants"
+	platformSpanHandlerCfgKey          = "trace_platform_span_handler_config"
+	traceIngestTenantCfgKey            = "trace_ingest_tenant_config"
+	annotationMqProducerCfgKey         = "annotation_mq_producer_config"
+	spanWithAnnotationMqProducerCfgKey = "span_with_annotation_mq_producer_config"
+	tenantTablesCfgKey                 = "trace_tenant_cfg"
+	traceCkCfgKey                      = "trace_ck_cfg"
+	traceFieldMetaInfoCfgKey           = "trace_field_meta_info"
+	traceMaxDurationDay                = "trace_max_duration_day"
+	annotationSourceCfgKey             = "annotation_source_cfg"
+	queryTraceRateLimitCfgKey          = "query_trace_rate_limit_config"
+	keySpanTypeCfgKey                  = "key_span_type"
+	backfillMqProducerCfgKey           = "backfill_mq_producer_config"
+	consumerListeningCfgKey            = "consumer_listening"
+	metricPlatformTenantCfgKey         = "metric_platform_tenants"
+	metricQueryConfigKey               = "metric_query_config"
 )
 
 type TraceConfigCenter struct {
@@ -69,6 +73,14 @@ func (t *TraceConfigCenter) GetTraceIngestTenantProducerCfg(ctx context.Context)
 func (t *TraceConfigCenter) GetAnnotationMqProducerCfg(ctx context.Context) (*config.MqProducerCfg, error) {
 	cfg := new(config.MqProducerCfg)
 	if err := t.UnmarshalKey(context.Background(), annotationMqProducerCfgKey, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (t *TraceConfigCenter) GetSpanWithAnnotationMqProducerCfg(ctx context.Context) (*config.MqProducerCfg, error) {
+	cfg := new(config.MqProducerCfg)
+	if err := t.UnmarshalKey(context.Background(), spanWithAnnotationMqProducerCfgKey, cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -169,6 +181,33 @@ func (t *TraceConfigCenter) GetKeySpanTypes(ctx context.Context) map[string][]st
 		return keyColumns
 	}
 	return keyColumns
+}
+
+func (t *TraceConfigCenter) GetConsumerListening(ctx context.Context) (*config.ConsumerListening, error) {
+	consumerListening := new(config.ConsumerListening)
+	if err := t.UnmarshalKey(ctx, consumerListeningCfgKey, &consumerListening); err != nil {
+		return nil, err
+	}
+	return consumerListening, nil
+}
+
+func (t *TraceConfigCenter) GetMetricPlatformTenants(ctx context.Context) (*config.PlatformTenantsCfg, error) {
+	cfg := new(config.PlatformTenantsCfg)
+	if err := t.UnmarshalKey(ctx, metricPlatformTenantCfgKey, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (t *TraceConfigCenter) GetMetricQueryConfig(ctx context.Context) *config.MetricQueryConfig {
+	cfg := new(config.MetricQueryConfig)
+	if err := t.UnmarshalKey(ctx, metricQueryConfigKey, cfg); err != nil {
+		logs.CtxWarn(ctx, "fail to get metric query cfg, %v", err)
+		return &config.MetricQueryConfig{
+			SupportOffline: false,
+		}
+	}
+	return cfg
 }
 
 func NewTraceConfigCenter(confP conf.IConfigLoader) config.ITraceConfig {

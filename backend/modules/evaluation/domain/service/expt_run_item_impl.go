@@ -40,6 +40,7 @@ func NewExptItemEvaluation(
 	evaluatorService EvaluatorService,
 	benefitService benefit.IBenefitService,
 	evalAsyncRepo repo.IEvalAsyncRepo,
+	evalSetItemSvc EvaluationSetItemService,
 ) ExptItemEvaluation {
 	return &ExptItemEvalCtxExecutor{
 		TurnResultRepo:         turnResultRepo,
@@ -51,6 +52,7 @@ func NewExptItemEvaluation(
 		evaluatorService:       evaluatorService,
 		benefitService:         benefitService,
 		evalAsyncRepo:          evalAsyncRepo,
+		evalSetItemSvc:         evalSetItemSvc,
 	}
 }
 
@@ -64,6 +66,7 @@ type ExptItemEvalCtxExecutor struct {
 	evaluatorRecordService EvaluatorRecordService
 	benefitService         benefit.IBenefitService
 	evalAsyncRepo          repo.IEvalAsyncRepo
+	evalSetItemSvc         EvaluationSetItemService
 }
 
 func (e *ExptItemEvalCtxExecutor) Eval(ctx context.Context, eiec *entity.ExptItemEvalCtx) error {
@@ -100,7 +103,7 @@ func (e *ExptItemEvalCtxExecutor) EvalTurns(ctx context.Context, eiec *entity.Ex
 
 		ctx = context.WithValue(ctx, consts.CtxKeyLogID, etec.GetTurnEvalLogID(ctx, turn.ID)) //nolint:staticcheck
 
-		turnRunRes := NewExptTurnEvaluation(e.Metric, e.evalTargetService, e.evaluatorService, e.benefitService, e.evalAsyncRepo).Eval(ctx, etec)
+		turnRunRes := NewExptTurnEvaluation(e.Metric, e.evalTargetService, e.evaluatorService, e.benefitService, e.evalAsyncRepo, e.evalSetItemSvc, e.evaluatorRecordService).Eval(ctx, etec)
 
 		if err := e.storeTurnRunResult(ctx, etec, turnRunRes); err != nil {
 			return false, err
@@ -143,7 +146,7 @@ func (e *ExptItemEvalCtxExecutor) storeTurnRunResult(ctx context.Context, etec *
 	var evalErr error
 
 	clone.ExptRunID = etec.Event.ExptRunID
-	if result.TargetResult != nil {
+	if result.TargetResult != nil && result.TargetResult.ID > 0 {
 		clone.TargetResultID = result.TargetResult.ID
 	}
 
@@ -166,7 +169,13 @@ func (e *ExptItemEvalCtxExecutor) storeTurnRunResult(ctx context.Context, etec *
 	}
 
 	if evalErr != nil {
-		errMsg := e.Configer.GetErrCtrl(ctx).ConvertErrMsg(evalErr.Error())
+		var errMsg string
+		if se, ok := errorx.FromStatusError(evalErr); ok && (se.Code() == errno.CustomEvalTargetInvokeFailCode || se.Code() == errno.CustomRPCEvaluatorRunFailedCode) {
+			errMsg = errorx.ErrorWithoutStack(evalErr)
+		} else {
+			errMsg = e.Configer.GetErrCtrl(ctx).ConvertErrMsg(evalErr.Error())
+		}
+
 		logs.CtxWarn(ctx, "[ExptTurnEval] store turn run err, before: %v, after: %v", evalErr, errMsg)
 
 		ei, ok := errno.ParseErrImpl(evalErr)
@@ -215,6 +224,13 @@ func (e *ExptItemEvalCtxExecutor) buildExptTurnEvalCtx(ctx context.Context, turn
 	for k, v := range eiec.Event.Ext {
 		etec.Ext[k] = v
 	}
+	// 从 ExptItemResult 中获取 Ext 字段并合并到 etec.Ext
+	itemResults, err := e.ItemResultRepo.BatchGet(ctx, spaceID, eiec.Event.ExptID, []int64{eiec.Event.EvalSetItemID})
+	if err == nil && len(itemResults) > 0 && itemResults[0].Ext != nil {
+		for k, v := range itemResults[0].Ext {
+			etec.Ext[k] = v
+		}
+	}
 	for _, fieldData := range eiec.EvalSetItem.Turns[0].FieldDataList {
 		if fieldData.Name == "span_id" {
 			etec.Ext["span_id"] = fieldData.Content.GetText()
@@ -244,13 +260,13 @@ func (e *ExptItemEvalCtxExecutor) buildExptTurnEvalCtx(ctx context.Context, turn
 
 	if erids := existTurnRunResult.EvaluatorResultIds; erids != nil && len(erids.EvalVerIDToResID) > 0 {
 		// evaluatorRecords, err := e.EvalCall.BatchGetEvaluatorRecord(ctx, spaceID, maps.ToSlice(erids.EvalVerIDToResID, func(k int64, v int64) int64 { return v }))
-		evaluatorRecords, err := e.evaluatorRecordService.BatchGetEvaluatorRecord(ctx, maps.ToSlice(erids.EvalVerIDToResID, func(k, v int64) int64 { return v }), false)
+		evaluatorRecords, err := e.evaluatorRecordService.BatchGetEvaluatorRecord(ctx, maps.ToSlice(erids.EvalVerIDToResID, func(k, v int64) int64 { return v }), false, false)
 		if err != nil {
 			return nil, err
 		}
 		recordMap := make(map[int64]*entity.EvaluatorRecord)
 		for _, record := range evaluatorRecords {
-			recordMap[record.ID] = record
+			recordMap[record.EvaluatorVersionID] = record
 		}
 		etec.ExptTurnRunResult.EvaluatorResults = recordMap
 	}
@@ -260,7 +276,7 @@ func (e *ExptItemEvalCtxExecutor) buildExptTurnEvalCtx(ctx context.Context, turn
 
 func (e *ExptItemEvalCtxExecutor) CompleteItemRun(ctx context.Context, event *entity.ExptItemEvalEvent, evalErr error) error {
 	if evalErr != nil {
-		if retry, _ := e.evalErrNeedRetry(ctx, event.SpaceID, event.RetryTimes, evalErr); retry {
+		if retry, _ := e.evalErrNeedRetry(ctx, event, evalErr); retry {
 			return evalErr
 		}
 	}
@@ -290,12 +306,18 @@ func (e *ExptItemEvalCtxExecutor) CompleteItemRun(ctx context.Context, event *en
 	return nil
 }
 
-func (e *ExptItemEvalCtxExecutor) evalErrNeedRetry(ctx context.Context, spaceID int64, retryTimes int, evalErr error) (bool, time.Duration) {
+func (e *ExptItemEvalCtxExecutor) evalErrNeedRetry(ctx context.Context, event *entity.ExptItemEvalEvent, evalErr error) (bool, time.Duration) {
 	if evalErr == nil {
 		return false, 0
 	}
+	spaceID := event.SpaceID
+	retryTimes := event.RetryTimes
 	conf := e.Configer.GetErrRetryConf(ctx, spaceID, evalErr)
-	return retryTimes < conf.GetRetryTimes(), conf.GetRetryInterval()
+	maxRetryTimes := conf.GetRetryTimes()
+	if event.MaxRetryTimes > 0 {
+		maxRetryTimes = event.MaxRetryTimes
+	}
+	return retryTimes < maxRetryTimes, conf.GetRetryInterval()
 }
 
 func (e *ExptItemEvalCtxExecutor) evalErrNeedTerminateExpt(ctx context.Context, spaceID int64, evalErr error) bool {

@@ -22,6 +22,7 @@ func TestStorageProvider_String(t *testing.T) {
 		{StorageProvider_Abase, "Abase"},
 		{StorageProvider_RDS, "RDS"},
 		{StorageProvider_LocalFS, "LocalFS"},
+		{StorageProvider_ExternalUrl, "ExternalUrl"},
 		{StorageProvider(999), "<UNSET>"}, // 未知值
 	}
 
@@ -46,6 +47,7 @@ func TestStorageProviderFromString(t *testing.T) {
 		{"Abase", StorageProvider_Abase, true},
 		{"RDS", StorageProvider_RDS, true},
 		{"LocalFS", StorageProvider_LocalFS, true},
+		{"ExternalUrl", StorageProvider_ExternalUrl, true},
 		{"unknown", StorageProvider(0), false},
 		{"", StorageProvider(0), false},
 	}
@@ -59,6 +61,27 @@ func TestStorageProviderFromString(t *testing.T) {
 			} else {
 				assert.Error(t, err)
 			}
+		})
+	}
+}
+
+func TestFileFormat_String(t *testing.T) {
+	type fields struct {
+		format FileFormat
+		expect string
+	}
+	testCases := []fields{
+		{FileFormat_JSONL, "JSONL"},
+		{FileFormat_Parquet, "Parquet"},
+		{FileFormat_CSV, "CSV"},
+		{FileFormat_XLSX, "XLSX"},
+		{FileFormat_ZIP, "ZIP"},
+		{FileFormat(999), "<UNSET>"}, // 未知值
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.expect, func(t *testing.T) {
+			assert.Equal(t, tc.expect, tc.format.String())
 		})
 	}
 }

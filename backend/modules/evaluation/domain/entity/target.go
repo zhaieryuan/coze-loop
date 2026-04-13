@@ -53,6 +53,9 @@ const (
 	EvalTargetTypeVolcengineAgent EvalTargetType = 5
 	// 自定义服务 for内场
 	EvalTargetTypeCustomRPCServer EvalTargetType = 6
+
+	// 火山智能体Agentkit
+	EvalTargetTypeVolcengineAgentAgentkit EvalTargetType = 7
 )
 
 func (p EvalTargetType) String() string {
@@ -69,16 +72,28 @@ func (p EvalTargetType) String() string {
 		return "VolcengineAgent"
 	case EvalTargetTypeCustomRPCServer:
 		return "CustomRPCServer"
+	case EvalTargetTypeVolcengineAgentAgentkit:
+		return "VolcengineAgentKit"
 	}
 	return "<UNSET>"
 }
 
+func (p EvalTargetType) SupptTrajectory() bool {
+	switch p {
+	case EvalTargetTypeVolcengineAgent, EvalTargetTypeCustomRPCServer, EvalTargetTypeLoopPrompt:
+		return true
+	default:
+		return false
+	}
+}
+
 func EvalTargetTypePtr(v EvalTargetType) *EvalTargetType { return &v }
+
 func (p *EvalTargetType) Scan(value interface{}) (err error) {
 	var result sql.NullInt64
 	err = result.Scan(value)
 	*p = EvalTargetType(result.Int64)
-	return
+	return err
 }
 
 func (p *EvalTargetType) Value() (driver.Value, error) {

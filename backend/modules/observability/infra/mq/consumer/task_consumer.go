@@ -12,6 +12,7 @@ import (
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
+	"github.com/coze-dev/coze-loop/backend/pkg/consts"
 	"github.com/coze-dev/coze-loop/backend/pkg/json"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/conv"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
@@ -22,7 +23,7 @@ type TaskConsumer struct {
 	conf.IConfigLoader
 }
 
-func newTaskConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
+func NewTaskConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
 	return &TaskConsumer{
 		handler:       handler,
 		IConfigLoader: loader,
@@ -52,13 +53,14 @@ func (e *TaskConsumer) ConsumerCfg(ctx context.Context) (*mq.ConsumerConfig, err
 }
 
 func (e *TaskConsumer) HandleMessage(ctx context.Context, ext *mq.MessageExt) error {
+	ctx = context.WithValue(ctx, consts.CtxKeyFlowMethodKey, "task_consumer")
 	logID := logs.NewLogID()
 	ctx = logs.SetLogID(ctx, logID)
 	event := new(entity.RawSpan)
 	if err := json.Unmarshal(ext.Body, event); err != nil {
-		logs.CtxError(ctx, "Task msg json unmarshal fail, raw: %v, err: %s", conv.UnsafeBytesToString(ext.Body), err)
+		logs.CtxWarn(ctx, "Task msg json unmarshal fail, raw: %v, err: %s", conv.UnsafeBytesToString(ext.Body), err)
 		return nil
 	}
 	logs.CtxInfo(ctx, "Span msg,log_id=%s, trace_id=%s, span_id=%s,msgID=%s", event.LogID, event.TraceID, event.SpanID, ext.MsgID)
-	return e.handler.SpanTrigger(ctx, event)
+	return e.handler.SpanTrigger(ctx, event, nil)
 }

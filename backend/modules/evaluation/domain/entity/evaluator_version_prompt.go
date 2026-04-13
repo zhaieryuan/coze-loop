@@ -111,6 +111,9 @@ func (do *PromptEvaluatorVersion) GetModelConfig() *ModelConfig {
 
 // ValidateInput 验证输入数据
 func (do *PromptEvaluatorVersion) ValidateInput(input *EvaluatorInputData) error {
+	if input == nil {
+		return errorx.NewByCode(errno.InvalidInputDataCode, errorx.WithExtraMsg("input data is nil"))
+	}
 	// 实现验证逻辑，
 	inputSchemaMap := make(map[string]*ArgsSchema)
 	for _, argsSchema := range do.InputSchemas {
@@ -147,7 +150,7 @@ func (do *PromptEvaluatorVersion) ValidateBaseInfo() error {
 	if do.ModelConfig == nil {
 		return errorx.NewByCode(errno.InvalidModelConfigCode, errorx.WithExtraMsg("model config is nil"))
 	}
-	if do.ModelConfig.ModelID == 0 && do.ModelConfig.ProviderModelID == nil {
+	if do.ModelConfig.ModelID == nil && do.ModelConfig.ProviderModelID == nil {
 		return errorx.NewByCode(errno.InvalidModelConfigCode, errorx.WithExtraMsg("model id is empty"))
 	}
 	return nil

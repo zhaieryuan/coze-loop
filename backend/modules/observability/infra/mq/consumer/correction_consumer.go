@@ -11,6 +11,7 @@ import (
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
+	"github.com/coze-dev/coze-loop/backend/pkg/consts"
 	"github.com/coze-dev/coze-loop/backend/pkg/json"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/conv"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
@@ -21,7 +22,7 @@ type CorrectionConsumer struct {
 	conf.IConfigLoader
 }
 
-func newCorrectionConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
+func NewCorrectionConsumer(handler obapp.ITaskQueueConsumer, loader conf.IConfigLoader) mq.IConsumerWorker {
 	return &CorrectionConsumer{
 		handler:       handler,
 		IConfigLoader: loader,
@@ -46,13 +47,14 @@ func (e *CorrectionConsumer) ConsumerCfg(ctx context.Context) (*mq.ConsumerConfi
 }
 
 func (e *CorrectionConsumer) HandleMessage(ctx context.Context, ext *mq.MessageExt) error {
+	ctx = context.WithValue(ctx, consts.CtxKeyFlowMethodKey, "correction_consumer")
 	logID := logs.NewLogID()
 	ctx = logs.SetLogID(ctx, logID)
 	event := new(entity.CorrectionEvent)
 	if err := json.Unmarshal(ext.Body, event); err != nil {
-		logs.CtxError(ctx, "Correction msg json unmarshal fail, raw: %v, err: %s", conv.UnsafeBytesToString(ext.Body), err)
+		logs.CtxError(ctx, "AutoEvalCorrection msg json unmarshal fail, raw: %v, err: %s", conv.UnsafeBytesToString(ext.Body), err)
 		return nil
 	}
-	logs.CtxInfo(ctx, "Correction msg, event: %v,msgID=%s", event, ext.MsgID)
-	return e.handler.Correction(ctx, event)
+	logs.CtxInfo(ctx, "AutoEvalCorrection msg, event: %v,msgID=%s", event, ext.MsgID)
+	return e.handler.AutoEvalCorrection(ctx, event)
 }

@@ -4,9 +4,13 @@
 package entity
 
 import (
+	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity/loop_span"
+	obErrorx "github.com/coze-dev/coze-loop/backend/modules/observability/pkg/errno"
+	"github.com/coze-dev/coze-loop/backend/pkg/errorx"
 )
 
 type RawSpan struct {
@@ -141,22 +145,24 @@ func (s *RawSpan) RawSpanConvertToLoopSpan() *loop_span.Span {
 	callType := tagsString["call_type"]
 	spanType := tagsString["span_type"]
 
+	// RawSpan 中的 tenant 一般在 Tags 字段里
+	// 而 LoopSpan 在 systemTagsString 中
+	// 这里是为了方便转化为 loopSpan 对象后统一使用 getTenant 方法
+	systemTagsString["tenant"] = tagsString["tenant"]
+
 	result := &loop_span.Span{
-		StartTime:        s.StartTimeInUs / 1000,
+		StartTime:        s.StartTimeInUs,
 		SpanID:           s.SpanID,
 		ParentID:         s.ParentID,
 		LogID:            s.LogID,
 		TraceID:          s.TraceID,
-		DurationMicros:   s.DurationInUs / 1000,
-		PSM:              s.ServerEnv.PSM,
+		DurationMicros:   s.DurationInUs,
 		CallType:         callType,
 		WorkspaceID:      spaceID,
 		SpanName:         s.SpanName,
 		SpanType:         spanType,
 		Method:           s.Method,
 		StatusCode:       s.StatusCode,
-		Input:            s.SensitiveTags.Input,
-		Output:           s.SensitiveTags.Output,
 		SystemTagsString: systemTagsString,
 		SystemTagsLong:   systemTagsLong,
 		SystemTagsDouble: systemTagsDouble,
@@ -166,6 +172,13 @@ func (s *RawSpan) RawSpanConvertToLoopSpan() *loop_span.Span {
 		TagsBool:         tagsBool,
 		TagsByte:         tagsByte,
 	}
+	if s.ServerEnv != nil {
+		result.PSM = s.ServerEnv.PSM
+	}
+	if s.SensitiveTags != nil {
+		result.Input = s.SensitiveTags.Input
+		result.Output = s.SensitiveTags.Output
+	}
 
 	return result
 }
@@ -174,6 +187,14 @@ type AutoEvalEvent struct {
 	ExptID          int64                       `json:"expt_id"`
 	TurnEvalResults []*OnlineExptTurnEvalResult `json:"turn_eval_results"`
 }
+
+func (e *AutoEvalEvent) Validate() error {
+	if len(e.TurnEvalResults) == 0 {
+		return fmt.Errorf("turn_eval_results is required")
+	}
+	return nil
+}
+
 type OnlineExptTurnEvalResult struct {
 	EvaluatorVersionID int64              `json:"evaluator_version_id"`
 	EvaluatorRecordID  int64              `json:"evaluator_record_id"`
@@ -215,16 +236,47 @@ func (s *OnlineExptTurnEvalResult) GetTraceIDFromExt() string {
 	return s.Ext["trace_id"]
 }
 
-func (s *OnlineExptTurnEvalResult) GetStartTimeFromExt() int64 {
+func (s *OnlineExptTurnEvalResult) GetStartTimeFromExt(storageDuration int64) int64 {
 	if s == nil {
 		return 0
 	}
-	startTimeStr := s.Ext["start_time"]
-	startTime, err := strconv.ParseInt(startTimeStr, 10, 64)
-	if err != nil {
+	if spanStartTime, ok := s.Ext["span_start_time"]; ok {
+		timeStr := spanStartTime
+		startTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return startTime
+	} else {
+		// span_start_time都有了之后，可以不需要提前那么久
+		timeStr := s.Ext["start_time"]
+		startTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return startTime/1000 - (24 * time.Duration(storageDuration) * time.Hour).Milliseconds()
+	}
+}
+
+func (s *OnlineExptTurnEvalResult) GetEndTimeFromExt() int64 {
+	if s == nil {
 		return 0
 	}
-	return startTime
+	if spanEndTime, ok := s.Ext["span_end_time"]; ok {
+		timeStr := spanEndTime
+		endTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return endTime
+	} else {
+		timeStr := s.Ext["start_time"]
+		startTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return startTime/1000 + time.Hour.Milliseconds()
+	}
 }
 
 func (s *OnlineExptTurnEvalResult) GetTaskIDFromExt() int64 {
@@ -249,6 +301,29 @@ func (s *OnlineExptTurnEvalResult) GetWorkspaceIDFromExt() (string, int64) {
 		return "", 0
 	}
 	return workspaceIDStr, workspaceID
+}
+
+func (s *OnlineExptTurnEvalResult) GetRunID() (int64, error) {
+	taskRunIDStr := s.Ext["run_id"]
+	if taskRunIDStr == "" {
+		return 0, fmt.Errorf("run_id not found in ext")
+	}
+
+	return strconv.ParseInt(taskRunIDStr, 10, 64)
+}
+
+func (s *OnlineExptTurnEvalResult) GetUserID() string {
+	if s.BaseInfo == nil || s.BaseInfo.CreatedBy == nil {
+		return ""
+	}
+	return s.BaseInfo.CreatedBy.UserID
+}
+
+func (s *OnlineExptTurnEvalResult) GetPlatformType() (loop_span.PlatformType, bool) {
+	if platform, ok := s.Ext["platform_type"]; ok {
+		return loop_span.PlatformType(platform), ok
+	}
+	return loop_span.PlatformCallbackAll, false
 }
 
 type EvaluatorRunError struct {
@@ -277,9 +352,14 @@ type CorrectionEvent struct {
 	UpdatedAt          int64             `json:"updated_at"`
 }
 
-type BackFillEvent struct {
-	SpaceID int64 `json:"space_id"`
-	TaskID  int64 `json:"task_id"`
+func (c *CorrectionEvent) Validate() error {
+	if c.EvaluatorRecordID == 0 {
+		return errorx.NewByCode(obErrorx.CommercialCommonInvalidParamCodeCode, errorx.WithExtraMsg("evaluator_record_id is empty"))
+	}
+	if c.EvaluatorResult == nil || c.EvaluatorResult.Correction == nil {
+		return errorx.NewByCode(obErrorx.CommercialCommonInvalidParamCodeCode, errorx.WithExtraMsg("correction is empty"))
+	}
+	return nil
 }
 
 func (c *CorrectionEvent) GetSpanIDFromExt() string {
@@ -300,12 +380,42 @@ func (c *CorrectionEvent) GetStartTimeFromExt() int64 {
 	if c == nil {
 		return 0
 	}
-	startTimeStr := c.Ext["start_time"]
-	startTime, err := strconv.ParseInt(startTimeStr, 10, 64)
-	if err != nil {
+	if spanStartTime, ok := c.Ext["span_start_time"]; ok {
+		timeStr := spanStartTime
+		startTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return startTime
+	} else {
+		timeStr := c.Ext["start_time"]
+		startTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return startTime/1000 - time.Hour.Milliseconds()
+	}
+}
+
+func (c *CorrectionEvent) GetEndTimeFromExt() int64 {
+	if c == nil {
 		return 0
 	}
-	return startTime
+	if spanEndTime, ok := c.Ext["span_end_time"]; ok {
+		timeStr := spanEndTime
+		endTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return endTime
+	} else {
+		timeStr := c.Ext["start_time"]
+		startTime, err := strconv.ParseInt(timeStr, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return startTime/1000 + time.Hour.Milliseconds()
+	}
 }
 
 func (c *CorrectionEvent) GetTaskIDFromExt() int64 {
@@ -330,4 +440,34 @@ func (c *CorrectionEvent) GetWorkspaceIDFromExt() (string, int64) {
 		return "", 0
 	}
 	return workspaceIDStr, workspaceID
+}
+
+func (c *CorrectionEvent) GetUpdateBy() string {
+	if c == nil || c.EvaluatorResult == nil || c.EvaluatorResult.Correction == nil {
+		return ""
+	}
+	return c.EvaluatorResult.Correction.UpdatedBy
+}
+
+func (c *CorrectionEvent) GetPlatformType() (loop_span.PlatformType, bool) {
+	if platform, ok := c.Ext["platform_type"]; ok {
+		return loop_span.PlatformType(platform), ok
+	}
+	return loop_span.PlatformCallbackAll, false
+}
+
+type BackFillEvent struct {
+	SpaceID int64 `json:"space_id"`
+	TaskID  int64 `json:"task_id"`
+	Retry   int32 `json:"retry,omitempty"`
+}
+
+func (b *BackFillEvent) Validate() error {
+	if b.SpaceID == 0 {
+		return errorx.NewByCode(obErrorx.CommercialCommonInvalidParamCodeCode, errorx.WithExtraMsg("space_id is empty"))
+	}
+	if b.TaskID == 0 {
+		return errorx.NewByCode(obErrorx.CommercialCommonInvalidParamCodeCode, errorx.WithExtraMsg("task_id is empty"))
+	}
+	return nil
 }

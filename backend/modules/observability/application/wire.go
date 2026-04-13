@@ -24,23 +24,30 @@ import (
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/foundation/auth/authservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/foundation/file/fileservice"
 	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/foundation/user/userservice"
-	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/task"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
+	mq3 "github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/mq"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/rpc"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/scheduledtask"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/storage"
 	metrics_entity "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/entity"
+	metric_repo "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/repo"
 	metric_service "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/service"
+	metric_agent "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/service/metric/agent"
 	metric_general "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/service/metric/general"
 	metric_model "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/service/metric/model"
 	metric_service_def "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/service/metric/service"
 	metric_tool "github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/service/metric/tool"
+	task_entity "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	trepo "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/repo"
 	taskSvc "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service"
 	task_processor "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/processor"
+	taskst "github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/scheduledtask"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/tracehub"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity/collector/exporter"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity/collector/processor"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity/collector/receiver"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/entity/loop_span"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/repo"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/service"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/trace/service/collector/exporter/clickhouseexporter"
@@ -55,7 +62,7 @@ import (
 	obrepo "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo"
 	ckdao "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/ck"
 	mysqldao "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/mysql"
-	tredis "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/redis/dao"
+	redis2 "github.com/coze-dev/coze-loop/backend/modules/observability/infra/repo/redis"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/rpc/auth"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/rpc/dataset"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/rpc/evaluation"
@@ -64,7 +71,11 @@ import (
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/rpc/file"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/rpc/tag"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/rpc/user"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/span_context_extractor"
+	obstorage "github.com/coze-dev/coze-loop/backend/modules/observability/infra/storage"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/tenant"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/time_range"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/workflow"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/workspace"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
 	"github.com/google/wire"
@@ -77,29 +88,33 @@ var (
 		obrepo.NewTaskRepoImpl,
 		// obrepo.NewTaskRunRepoImpl,
 		mysqldao.NewTaskDaoImpl,
-		tredis.NewTaskDAO,
-		tredis.NewTaskRunDAO,
+		redis2.NewTaskDAO,
+		redis2.NewTaskRunDAO,
 		mysqldao.NewTaskRunDaoImpl,
 		mq2.NewBackfillProducerImpl,
+		NewScheduledTask,
 	)
 	traceDomainSet = wire.NewSet(
 		service.NewTraceServiceImpl,
 		service.NewTraceExportServiceImpl,
-		obrepo.NewTraceCKRepoImpl,
-		ckdao.NewSpansCkDaoImpl,
-		ckdao.NewAnnotationCkDaoImpl,
+		provideTraceRepo,
+		obstorage.NewTraceStorageProvider,
 		obmetrics.NewTraceMetricsImpl,
 		obcollector.NewEventCollectorProvider,
 		mq2.NewTraceProducerImpl,
 		mq2.NewAnnotationProducerImpl,
+		mq2.NewSpanWithAnnotationProducerImpl,
 		file.NewFileRPCProvider,
 		NewTraceConfigLoader,
 		NewTraceProcessorBuilder,
 		obconfig.NewTraceConfigCenter,
 		tenant.NewTenantProvider,
 		workspace.NewWorkspaceProvider,
+		span_context_extractor.NewSpanContextExtractor,
 		evaluator.NewEvaluatorRPCProvider,
 		NewDatasetServiceAdapter,
+		redis2.NewSpansRedisDaoImpl,
+		mysqldao.NewTrajectoryConfigDaoImpl,
 		taskDomainSet,
 	)
 	traceSet = wire.NewSet(
@@ -109,22 +124,25 @@ var (
 		auth.NewAuthProvider,
 		user.NewUserRPCProvider,
 		tag.NewTagRPCProvider,
+		workflow.NewWorkflowProvider,
 		traceDomainSet,
 	)
 	traceIngestionSet = wire.NewSet(
 		NewIngestionApplication,
 		service.NewIngestionServiceImpl,
-		obrepo.NewTraceCKRepoImpl,
-		ckdao.NewSpansCkDaoImpl,
-		ckdao.NewAnnotationCkDaoImpl,
+		provideTraceRepo,
 		obconfig.NewTraceConfigCenter,
 		NewTraceConfigLoader,
 		NewIngestionCollectorFactory,
+		mq2.NewSpanWithAnnotationProducerImpl,
+		redis2.NewSpansRedisDaoImpl,
+		mysqldao.NewTrajectoryConfigDaoImpl,
 	)
 	openApiSet = wire.NewSet(
 		NewOpenAPIApplication,
 		auth.NewAuthProvider,
 		traceDomainSet,
+		time_range.NewTimeRangeProvider,
 	)
 	taskSet = wire.NewSet(
 		tracehub.NewTraceHubImpl,
@@ -134,22 +152,66 @@ var (
 		evaluation.NewEvaluationRPCProvider,
 		NewTaskLocker,
 		traceDomainSet,
+		taskSvc.NewTaskCallbackServiceImpl,
 	)
 	metricsSet = wire.NewSet(
 		NewMetricApplication,
 		metric_service.NewMetricsService,
-		obrepo.NewTraceMetricCKRepoImpl,
+		provideTraceMetricRepo,
+		obrepo.NewOfflineMetricRepoImpl,
 		tenant.NewTenantProvider,
 		auth.NewAuthProvider,
 		NewTraceConfigLoader,
 		NewTraceProcessorBuilder,
 		obconfig.NewTraceConfigCenter,
-		NewMetricDefinitions,
-		ckdao.NewSpansCkDaoImpl,
-		ckdao.NewAnnotationCkDaoImpl,
+		ckdao.NewOfflineMetricDaoImpl,
 		file.NewFileRPCProvider,
+		NewMetricsPlatformConfig,
 	)
 )
+
+func provideTraceRepo(
+	traceConfig config.ITraceConfig,
+	storageProvider storage.IStorageProvider,
+	spanRedisDao redis2.ISpansRedisDao,
+	ckProvider ck.Provider,
+	spanProducer mq3.ISpanProducer,
+	trajectoryConfDao mysqldao.ITrajectoryConfigDao,
+	idGenerator idgen.IIDGenerator,
+) (repo.ITraceRepo, error) {
+	options, err := buildTraceRepoOptions(ckProvider)
+	if err != nil {
+		return nil, err
+	}
+	return obrepo.NewTraceRepoImpl(traceConfig, storageProvider, spanRedisDao, spanProducer, trajectoryConfDao, idGenerator, options...)
+}
+
+func provideTraceMetricRepo(
+	traceConfig config.ITraceConfig,
+	idGenerator idgen.IIDGenerator,
+	storageProvider storage.IStorageProvider,
+	ckProvider ck.Provider,
+) (metric_repo.IMetricRepo, error) {
+	options, err := buildTraceRepoOptions(ckProvider)
+	if err != nil {
+		return nil, err
+	}
+	return obrepo.NewTraceMetricCKRepoImpl(traceConfig, idGenerator, storageProvider, options...)
+}
+
+func buildTraceRepoOptions(ckProvider ck.Provider) ([]obrepo.TraceRepoOption, error) {
+	ckSpanDao, err := ckdao.NewSpansCkDaoImpl(ckProvider)
+	if err != nil {
+		return nil, err
+	}
+	ckAnnoDao, err := ckdao.NewAnnotationCkDaoImpl(ckProvider)
+	if err != nil {
+		return nil, err
+	}
+	return []obrepo.TraceRepoOption{
+		obrepo.WithTraceStorageDaos(ckdao.TraceStorageTypeCK, ckSpanDao, ckAnnoDao),
+	}, nil
+}
 
 func NewTaskLocker(cmdable redis.Cmdable) lock.ILocker {
 	return lock.NewRedisLockerWithHolder(cmdable, "observability")
@@ -160,6 +222,32 @@ func NewTraceProcessorBuilder(
 	fileProvider rpc.IFileProvider,
 	benefitSvc benefit.IBenefitService,
 ) service.TraceFilterProcessorBuilder {
+	processorFactories := map[entity.ProcessorScene][]span_processor.Factory{
+		entity.SceneGetTrace: {
+			span_processor.NewPlatformProcessorFactory(traceConfig),
+			span_processor.NewCheckProcessorFactory(),
+			span_processor.NewAttrTosProcessorFactory(fileProvider),
+			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
+		},
+		entity.SceneListSpans: {
+			span_processor.NewPlatformProcessorFactory(traceConfig),
+			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
+		},
+		entity.SceneAdvanceInfo: {
+			span_processor.NewCheckProcessorFactory(),
+		},
+		entity.SceneIngestTrace: {},
+		entity.SceneSearchTraceOApi: {
+			span_processor.NewPlatformProcessorFactory(traceConfig),
+			span_processor.NewCheckProcessorFactory(),
+			span_processor.NewAttrTosProcessorFactory(fileProvider),
+			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
+		},
+		entity.SceneListSpansOApi: {
+			span_processor.NewPlatformProcessorFactory(traceConfig),
+			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
+		},
+	}
 	return service.NewTraceFilterProcessorBuilder(
 		span_filter.NewPlatformFilterFactory(
 			[]span_filter.Factory{
@@ -168,87 +256,91 @@ func NewTraceProcessorBuilder(
 				span_filter.NewEvaluatorFilterFactory(),
 				span_filter.NewEvalTargetFilterFactory(),
 			}),
-		// get trace processors
-		[]span_processor.Factory{
-			span_processor.NewPlatformProcessorFactory(traceConfig),
-			span_processor.NewCheckProcessorFactory(),
-			span_processor.NewAttrTosProcessorFactory(fileProvider),
-			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
-		},
-		// list spans processors
-		[]span_processor.Factory{
-			span_processor.NewPlatformProcessorFactory(traceConfig),
-			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
-		},
-		// batch get advance info processors
-		[]span_processor.Factory{
-			span_processor.NewCheckProcessorFactory(),
-		},
-		// ingest trace processors
-		[]span_processor.Factory{},
-		// search trace open api processors
-		[]span_processor.Factory{
-			span_processor.NewPlatformProcessorFactory(traceConfig),
-			span_processor.NewCheckProcessorFactory(),
-			span_processor.NewAttrTosProcessorFactory(fileProvider),
-			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
-		},
-		// list trace open api processors
-		[]span_processor.Factory{
-			span_processor.NewPlatformProcessorFactory(traceConfig),
-			span_processor.NewExpireErrorProcessorFactory(benefitSvc),
-		})
+		processorFactories)
 }
 
-func NewMetricDefinitions() []metrics_entity.IMetricDefinition {
-	return []metrics_entity.IMetricDefinition{
-		metric_general.NewGeneralTotalCountMetric(),
-		metric_general.NewGeneralFailRatioMetric(),
-		metric_general.NewGeneralModelTotalTokensMetric(),
-		metric_general.NewGeneralModelLatencyMetric(),
-		metric_general.NewGeneralModelFailRatioMetric(),
-		metric_general.NewGeneralToolTotalCountMetric(),
-		metric_general.NewGeneralToolLatencyMetric(),
-		metric_general.NewGeneralToolFailRatioMetric(),
+func NewMetricsPlatformConfig() *metrics_entity.PlatformMetrics {
+	return &metrics_entity.PlatformMetrics{
+		DrillDownObjects: map[string]*loop_span.FilterField{
+			"model_id": &loop_span.FilterField{
+				FieldName: "model_name",
+				FieldType: loop_span.FieldTypeString,
+			},
+			"span_name": &loop_span.FilterField{
+				FieldName: loop_span.SpanFieldSpanName,
+				FieldType: loop_span.FieldTypeString,
+			},
+			"status_code": &loop_span.FilterField{
+				FieldName: loop_span.SpanFieldStatusCode,
+				FieldType: loop_span.FieldTypeLong,
+			},
+		},
+		MetricGroups: map[string]*metrics_entity.MetricGroup{
+			"all": {
+				MetricDefinitions: []metrics_entity.IMetricDefinition{
+					metric_general.NewGeneralTotalCountMetric(),
+					metric_general.NewGeneralFailRatioMetric(),
+					metric_general.NewGeneralModelTotalTokensMetric(),
+					metric_general.NewGeneralModelLatencyMetric(),
+					metric_general.NewGeneralModelFailRatioMetric(),
+					metric_general.NewGeneralToolTotalCountMetric(),
+					metric_general.NewGeneralToolLatencyMetric(),
+					metric_general.NewGeneralToolFailRatioMetric(),
 
-		metric_model.NewModelDurationMetric(),
-		metric_model.NewModelInputTokenCountMetric(),
-		metric_model.NewModelOutputTokenCountMetric(),
-		metric_model.NewModelNamePieMetric(),
-		metric_model.NewModelQPMAllMetric(),
-		metric_model.NewModelQPMFailMetric(),
-		metric_model.NewModelQPMSuccessMetric(),
-		metric_model.NewModelQPSAllMetric(),
-		metric_model.NewModelQPSFailMetric(),
-		metric_model.NewModelQPSSuccessMetric(),
-		metric_model.NewModelSuccessRatioMetric(),
-		metric_model.NewModelSystemTokenCountMetric(),
-		metric_model.NewModelTokenCountMetric(),
-		metric_model.NewModelTokenCountPieMetric(),
-		metric_model.NewModelToolChoiceTokenCountMetric(),
-		metric_model.NewModelTPMMetric(),
-		metric_model.NewModelTPOTMetric(),
-		metric_model.NewModelTPSMetric(),
-		metric_model.NewModelTTFTMetric(),
+					metric_model.NewModelDurationMetric(),
+					metric_model.NewModelInputTokenCountMetric(),
+					metric_model.NewModelOutputTokenCountMetric(),
+					metric_model.NewModelTotalCountPieMetric(),
+					metric_model.NewModelQPMAllMetric(),
+					metric_model.NewModelQPMFailMetric(),
+					metric_model.NewModelQPMSuccessMetric(),
+					metric_model.NewModelQPSAllMetric(),
+					metric_model.NewModelQPSFailMetric(),
+					metric_model.NewModelQPSSuccessMetric(),
+					metric_model.NewModelSuccessRatioMetric(),
+					metric_model.NewModelSystemTokenCountMetric(),
+					metric_model.NewModelTokenCountMetric(),
+					metric_model.NewModelTokenCountPieMetric(),
+					metric_model.NewModelToolChoiceTokenCountMetric(),
+					metric_model.NewModelTPMMetric(),
+					metric_model.NewModelTPOTMetric(),
+					metric_model.NewModelTPSMetric(),
+					metric_model.NewModelTTFTMetric(),
+					metric_model.NewModelTotalCountMetric(),
+					metric_model.NewModelTotalSuccessCountMetric(),
+					metric_model.NewModelTotalErrorCountMetricc(),
 
-		metric_service_def.NewServiceDurationMetric(),
-		metric_service_def.NewServiceExecutionStepCountMetric(),
-		metric_service_def.NewServiceMessageCountMetric(),
-		metric_service_def.NewServiceQPMAllMetric(),
-		metric_service_def.NewServiceQPMSuccessMetric(),
-		metric_service_def.NewServiceQPMFailMetric(),
-		metric_service_def.NewServiceQPSAllMetric(),
-		metric_service_def.NewServiceQPSSuccessMetric(),
-		metric_service_def.NewServiceQPSFailMetric(),
-		metric_service_def.NewServiceSpanCountMetric(),
-		metric_service_def.NewServiceSuccessRatioMetric(),
-		metric_service_def.NewServiceTraceCountMetric(),
-		metric_service_def.NewServiceUserCountMetric(),
+					metric_service_def.NewServiceDurationMetric(),
+					metric_service_def.NewServiceExecutionStepCountMetric(),
+					metric_service_def.NewServiceMessageCountMetric(),
+					metric_service_def.NewServiceQPMAllMetric(),
+					metric_service_def.NewServiceQPMSuccessMetric(),
+					metric_service_def.NewServiceQPMFailMetric(),
+					metric_service_def.NewServiceQPSAllMetric(),
+					metric_service_def.NewServiceQPSSuccessMetric(),
+					metric_service_def.NewServiceQPSFailMetric(),
+					metric_service_def.NewServiceSpanCountMetric(),
+					metric_service_def.NewServiceSpanErrorCountMetric(),
+					metric_service_def.NewServiceSuccessRatioMetric(),
+					metric_service_def.NewServiceTraceCountMetric(),
+					metric_service_def.NewServiceTraceSuccessCountMetric(),
+					metric_service_def.NewServiceTraceErrorCountMetric(),
+					metric_service_def.NewServiceUserCountMetric(),
+					metric_service_def.NewServiceUniqTraceMetric(),
 
-		metric_tool.NewToolDurationMetric(),
-		metric_tool.NewToolNamePieMetric(),
-		metric_tool.NewToolSuccessRatioMetric(),
-		metric_tool.NewToolTotalCountMetric(),
+					metric_tool.NewToolDurationMetric(),
+					metric_tool.NewToolSuccessRatioMetric(),
+					metric_tool.NewToolTotalCountMetric(),
+					metric_tool.NewToolTotalCountPieMetric(),
+					metric_tool.NewToolTotalSuccessCountMetric(),
+					metric_tool.NewToolTotalErrorCountMetric(),
+
+					metric_agent.NewAgentExecutionStepAvgMetric(),
+					metric_agent.NewAgentToolExecutionStepAvgMetric(),
+					metric_agent.NewAgentModelExecutionStepAvgMetric(),
+				},
+			},
+		},
 	}
 }
 
@@ -281,14 +373,30 @@ func NewInitTaskProcessor(datasetServiceProvider *service.DatasetServiceAdaptor,
 	evaluationService rpc.IEvaluationRPCAdapter, taskRepo trepo.ITaskRepo,
 ) *task_processor.TaskProcessor {
 	taskProcessor := task_processor.NewTaskProcessor()
-	taskProcessor.Register(task.TaskTypeAutoEval, task_processor.NewAutoEvaluteProcessor(0, datasetServiceProvider, evalService, evaluationService, taskRepo))
+	taskProcessor.Register(task_entity.TaskTypeAutoEval, task_processor.NewAutoEvaluateProcessor(
+		0, datasetServiceProvider, evalService, evaluationService, taskRepo, &task_processor.EvalTargetBuilderImpl{}))
 	return taskProcessor
+}
+
+func NewScheduledTask(
+	locker lock.ILocker,
+	config config.ITraceConfig,
+	traceHubService tracehub.ITraceHubService,
+	taskService taskSvc.ITaskService,
+	taskProcessor task_processor.TaskProcessor,
+	taskRepo trepo.ITaskRepo,
+) []scheduledtask.ScheduledTask {
+	return []scheduledtask.ScheduledTask{
+		taskst.NewStatusCheckTask(locker, config, traceHubService, taskService, taskProcessor, taskRepo),
+		taskst.NewLocalCacheRefreshTask(traceHubService, taskRepo),
+	}
 }
 
 func InitTraceApplication(
 	db db.Provider,
 	ckDb ck.Provider,
 	redis redis.Cmdable,
+	persistentCmdable redis.PersistentCmdable,
 	meter metrics.Meter,
 	mqFactory mq.IFactory,
 	configFactory conf.IConfigLoaderFactory,
@@ -319,6 +427,7 @@ func InitOpenAPIApplication(
 	redis redis.Cmdable,
 	idgen idgen.IIDGenerator,
 	evalService evaluatorservice.Client,
+	persistentCmdable redis.PersistentCmdable,
 ) (IObservabilityOpenAPIApplication, error) {
 	wire.Build(openApiSet)
 	return nil, nil
@@ -326,10 +435,12 @@ func InitOpenAPIApplication(
 
 func InitMetricApplication(
 	ckDb ck.Provider,
+	storageProvider storage.IStorageProvider,
 	configFactory conf.IConfigLoaderFactory,
 	fileClient fileservice.Client,
 	benefit benefit.IBenefitService,
 	authClient authservice.Client,
+	idGenerator idgen.IIDGenerator,
 ) (IMetricApplication, error) {
 	wire.Build(metricsSet)
 	return nil, nil
@@ -337,8 +448,12 @@ func InitMetricApplication(
 
 func InitTraceIngestionApplication(
 	configFactory conf.IConfigLoaderFactory,
+	storageProvider storage.IStorageProvider,
 	ckDb ck.Provider,
+	db db.Provider,
 	mqFactory mq.IFactory,
+	persistentCmdable redis.PersistentCmdable,
+	idGenerator idgen.IIDGenerator,
 ) (ITraceIngestionApplication, error) {
 	wire.Build(traceIngestionSet)
 	return nil, nil
@@ -350,6 +465,7 @@ func InitTaskApplication(
 	configFactory conf.IConfigLoaderFactory,
 	benefit benefit.IBenefitService,
 	ckDb ck.Provider,
+	meter metrics.Meter,
 	redis redis.Cmdable,
 	mqFactory mq.IFactory,
 	userClient userservice.Client,
@@ -361,6 +477,7 @@ func InitTaskApplication(
 	fileClient fileservice.Client,
 	taskProcessor task_processor.TaskProcessor,
 	aid int32,
+	persistentCmdable redis.PersistentCmdable,
 ) (ITaskApplication, error) {
 	wire.Build(taskSet)
 	return nil, nil

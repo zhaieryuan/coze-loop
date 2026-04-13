@@ -63,6 +63,7 @@ enum InvokeEvalTargetStatus {
 // 新增
 struct InvokeEvalTargetOutput {
     1: optional Content actual_output
+    2: optional map<string, Content> ext_output // 额外输出，用户可自定义评测对象的输出字段和结构
 
     20: optional map<string, string> ext     // 扩展字段，用户如果想返回一些额外信息可以塞在这个字段
 }
@@ -72,15 +73,27 @@ struct Content {
     10: optional string text // 当content_type=text，则从此字段中取值
     11: optional Image image    // 当content_type=image，则从此字段中取图片信息
     12: optional list<Content> multi_part   // 当content_type=multi_part，则从此字段遍历获取多模态的值
+    13: optional Audio audio
+    14: optional Video video
 }
 
 typedef string ContentType(ts.enum="true")
 const ContentType ContentType_Text = "text" // 文本类型：string、integer、float、boolean、object、array都属于文本类型
 const ContentType ContentType_Image = "image"
+const ContentType ContentType_Audio = "audio"
+const ContentType ContentType_Video = "video"
 const ContentType ContentType_MultiPart = "multi_part"  // 多模态，例如图+文
 
 struct Image {
     1: optional string url
+}
+
+struct Video {
+    1: optional string url
+}
+
+struct Audio {
+  1: optional string url
 }
 
 struct InvokeEvalTargetUsage {
@@ -101,8 +114,86 @@ struct AsyncInvokeEvalTargetResponse {
     255: base.BaseResp BaseResp (api.none="true")
 }
 
+// the run status enumerate for custom evaluator
+enum InvokeEvaluatorRunStatus {
+    UNKNOWN = 0
+    SUCCESS = 1
+    FAILED = 2
+}
+
+// the custom evaluator identity and parameter information
+struct InvokeCustomEvaluator {
+    1: optional string provider_evaluator_code // provider-side evaluator identity code
+}
+
+// the input data structure for custom evaluator
+struct InvokeEvaluatorInputData {
+    1: optional map<string, Content> input_fields    // key-value structure of input variables required by the evaluator
+    2: optional map<string, Content> evaluate_dataset_fields      // key-value structure of dataset variables required by the evaluator
+    3: optional map<string, Content> evaluate_target_output_fields // key-value structure of target output variables required by the evaluator
+
+    20: optional map<string, string> ext // dynamic fields for inject parameters
+}
+
+// the output data structure for custom evaluator
+struct InvokeEvaluatorOutputData {
+    1: optional InvokeEvaluatorResult evaluator_result
+    2: optional InvokeEvaluatorUsage evaluator_usage
+    3: optional InvokeEvaluatorRunError evaluator_run_error
+
+    12: optional EvaluatorExtraOutputContent extra_output
+}
+
+// the result data structure for custom evaluator
+struct InvokeEvaluatorResult {
+    1: optional double score
+    2: optional string reasoning
+}
+
+// the usage data structure for custom evaluator
+struct InvokeEvaluatorUsage {
+    1: optional i64 input_tokens
+    2: optional i64 output_tokens
+}
+
+// the error data structure for custom evaluator
+struct InvokeEvaluatorRunError {
+    1: optional i32 code
+    2: optional string message
+}
+
+typedef string EvaluatorExtraOutputType(ts.enum="true")
+const EvaluatorExtraOutputType EvaluatorExtraOutputType_HTML = "html"
+const EvaluatorExtraOutputType EvaluatorExtraOutputType_Markdown = "markdown"
+
+struct EvaluatorExtraOutputContent {
+    1: optional EvaluatorExtraOutputType output_type
+    2: optional string uri
+    3: optional string url
+}
+
+// invoke custom evaluator request
+struct InvokeEvaluatorRequest {
+    1: optional i64 workspace_id
+    2: optional InvokeCustomEvaluator evaluator
+    3: optional InvokeEvaluatorInputData input_data
+
+    255: optional base.Base Base
+}
+
+// invoke custom evaluator response
+struct InvokeEvaluatorResponse {
+    1: optional InvokeEvaluatorOutputData output_data
+    2: optional InvokeEvaluatorRunStatus status
+
+    255: base.BaseResp BaseResp
+}
+
 service EvaluationSPIService {
     SearchEvalTargetResponse SearchEvalTarget(1: SearchEvalTargetRequest req)   // 搜索评测对象
     InvokeEvalTargetResponse InvokeEvalTarget(1: InvokeEvalTargetRequest req)   // 执行
     AsyncInvokeEvalTargetResponse AsyncInvokeEvalTarget(1: AsyncInvokeEvalTargetRequest req)    // 异步执行
+
+    // invoke custom evaluator
+    InvokeEvaluatorResponse InvokeEvaluator(1: InvokeEvaluatorRequest req)
 }

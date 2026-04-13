@@ -127,6 +127,10 @@ func SchedulerChain(mws ...SchedulerMiddleware) SchedulerMiddleware {
 
 func (e *ExptSchedulerImpl) SysOps(next SchedulerEndPoint) SchedulerEndPoint {
 	return func(ctx context.Context, event *entity.ExptScheduleEvent) error {
+		if e.Configer.GetSchedulerAbortCtrl(ctx).Abort(event.SpaceID, event.ExptID, event.Session.UserID, event.ExptType) {
+			logs.CtxWarn(ctx, "[ExptEval] expt schedule aborted, event: %v", json.Jsonify(event))
+			return nil
+		}
 		return next(ctx, event)
 	}
 }
@@ -158,17 +162,25 @@ func (e *ExptSchedulerImpl) makeExptRunExecLockKey(exptID, exptRunID int64) stri
 
 func (e *ExptSchedulerImpl) HandleEventLock(next SchedulerEndPoint) SchedulerEndPoint {
 	return func(ctx context.Context, event *entity.ExptScheduleEvent) error {
-		locked, ctx, unlock, err := e.Mutex.LockWithRenew(ctx, e.makeExptRunExecLockKey(event.ExptID, event.ExptRunID), time.Second*20, time.Second*60*5)
+		key := e.makeExptRunExecLockKey(event.ExptID, event.ExptRunID)
+		locked, ctx, cancel, err := e.Mutex.LockWithRenew(ctx, key, time.Second*5, time.Second*60*5)
 		if err != nil {
 			return err
 		}
-		logs.CtxInfo(ctx, "ExptSchedulerConsumer.HandleEventLock locked expt eval event: %v", json.Jsonify(event))
+
+		logs.CtxInfo(ctx, "ExptSchedulerConsumer.HandleEventLock locked expt eval event: %v, key: %v", json.Jsonify(event), key)
+
 		if !locked {
 			logs.CtxWarn(ctx, "ExptSchedulerConsumer.HandleEventLock found locked expt eval event: %v. Abort event, err: %v", json.Jsonify(event), err)
 			return nil
 		}
 
-		defer unlock()
+		defer func() {
+			cancel()
+			if _, err := e.Mutex.Unlock(key); err != nil {
+				logs.CtxWarn(ctx, "failed to unlock key: %v, err: %v", key, err)
+			}
+		}()
 
 		return next(ctx, event)
 	}
@@ -246,7 +258,14 @@ func (e *ExptSchedulerImpl) schedule(ctx context.Context, event *entity.ExptSche
 	}
 
 	complete = append(complete, zombies...)
+	logs.CtxInfo(ctx, "expt scheduler scan item, to_submit: %v, incomplete: %v, complete: %v",
+		entity.ExptEvalItems(toSubmit).GetItemIDs(), entity.ExptEvalItems(incomplete).GetItemIDs(), entity.ExptEvalItems(complete).GetItemIDs())
+
 	if err = e.recordEvalItemRunLogs(ctx, event, complete, mode); err != nil {
+		return err
+	}
+
+	if err = e.handleToSubmits(ctx, event, toSubmit); err != nil {
 		return err
 	}
 
@@ -260,17 +279,17 @@ func (e *ExptSchedulerImpl) schedule(ctx context.Context, event *entity.ExptSche
 		return err
 	}
 
-	if err = e.handleToSubmits(ctx, event, toSubmit); err != nil {
-		return err
-	}
-
 	if !nextTick {
 		return nil
 	}
 
 	logs.CtxInfo(ctx, "[ExptEval] expt daemon with next tick, expt_id: %v, event: %v", event.ExptID, event)
 
-	time.Sleep(time.Second * 3)
+	select {
+	case <-time.After(time.Second * 3):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return mode.NextTick(ctx, event, nextTick)
 }
 
@@ -343,6 +362,7 @@ func (e *ExptSchedulerImpl) handleToSubmits(ctx context.Context, event *entity.E
 			ExptRunMode:   event.ExptRunMode,
 			EvalSetItemID: ts.ItemID,
 			CreateAt:      now,
+			MaxRetryTimes: event.ItemRetryTimes,
 			Ext:           event.Ext,
 			Session:       event.Session,
 		})
@@ -413,7 +433,7 @@ func (e *ExptSchedulerImpl) handleZombies(ctx context.Context, event *entity.Exp
 
 	logs.CtxWarn(ctx, "[ExptEval] found zombie items, set failure state, expt_id: %v, expt_run_id: %v, item_ids: %v, zombie_second: %v", event.ExptID, event.ExptRunID, zombieItemIDs, zombieSecond)
 
-	if err := e.ExptItemResultRepo.UpdateItemRunLog(ctx, event.ExptID, event.ExptRunID, zombieItemIDs, map[string]any{"status": int32(entity.ItemRunState_Fail)}, event.SpaceID); err != nil {
+	if err := e.ExptItemResultRepo.UpdateItemRunLog(ctx, event.ExptID, event.ExptRunID, zombieItemIDs, map[string]any{"status": int32(entity.ItemRunState_Fail), "result_state": int32(entity.ExptItemResultStateLogged)}, event.SpaceID); err != nil {
 		return nil, nil, err
 	}
 

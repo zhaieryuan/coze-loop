@@ -11,7 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/config"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/component/tenant"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/entity"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/metric/repo"
@@ -25,9 +27,12 @@ import (
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/goroutine"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/ptr"
 	"github.com/coze-dev/coze-loop/backend/pkg/logs"
+	timeutil "github.com/coze-dev/coze-loop/backend/pkg/time"
 	"github.com/samber/lo"
 	"golang.org/x/sync/errgroup"
 )
+
+const defaultGroupKey = "all"
 
 type QueryMetricsReq struct {
 	PlatformType    loop_span.PlatformType
@@ -38,54 +43,193 @@ type QueryMetricsReq struct {
 	DrillDownFields []*loop_span.FilterField
 	StartTime       int64
 	EndTime         int64
+	GroupBySpaceID  bool
+	Source          span_filter.SourceType
 }
 
 type QueryMetricsResp struct {
 	Metrics map[string]*entity.Metric
 }
 
+type TraverseMetricsReq struct {
+	PlatformTypes []loop_span.PlatformType
+	MetricsNames  []string
+	WorkspaceID   int64
+	StartDate     string // e.g. 2025-11-17
+	QueryTimeout  time.Duration
+}
+
+type TraverseMetricsResp struct {
+	Statistic TraverseMetricStatistic
+	Failures  []*TraverseMetricDetail
+}
+
+type TraverseMetricStatistic struct {
+	Total   int
+	Success int
+	Failure int
+}
+
+type TraverseMetricDetail struct {
+	PlatformType loop_span.PlatformType
+	MetricName   string
+	Error        error
+	TimeCost     time.Duration
+}
+
 //go:generate mockgen -destination=mocks/metrics.go -package=mocks . IMetricsService
 type IMetricsService interface {
 	QueryMetrics(ctx context.Context, req *QueryMetricsReq) (*QueryMetricsResp, error)
+	TraverseMetrics(ctx context.Context, req *TraverseMetricsReq) (*TraverseMetricsResp, error)
+	GetMetricGroupBy(metricName string) ([]string, error)
 }
 
 type MetricsService struct {
-	metricRepo     repo.IMetricRepo
-	metricDefMap   map[string]entity.IMetricDefinition
-	buildHelper    trace_service.TraceFilterProcessorBuilder
-	tenantProvider tenant.ITenantProvider
+	metricRepo      repo.IMetricRepo
+	oMetricRepo     repo.IOfflineMetricRepo
+	metricDefMap    map[string]entity.IMetricDefinition
+	metricDrillDown map[string][]string
+	buildHelper     trace_service.TraceFilterProcessorBuilder
+	tenantProvider  tenant.ITenantProvider
+	traceConfig     config.ITraceConfig
+	pMetrics        *entity.PlatformMetrics
 }
 
 func NewMetricsService(
 	metricRepo repo.IMetricRepo,
-	metricDefs []entity.IMetricDefinition,
+	oMetricRepo repo.IOfflineMetricRepo,
 	tenantProvider tenant.ITenantProvider,
 	buildHelper trace_service.TraceFilterProcessorBuilder,
+	traceConfig config.ITraceConfig,
+	pMetrics *entity.PlatformMetrics,
 ) (IMetricsService, error) {
-	metricDefMap := make(map[string]entity.IMetricDefinition)
-	for _, def := range metricDefs {
-		metrics := []entity.IMetricDefinition{}
-		if mAdapter, ok := def.(entity.IMetricAdapter); ok {
-			for _, wrapper := range mAdapter.Wrappers() {
-				metrics = append(metrics, wrapper.Wrap(def))
-			}
-		} else {
-			metrics = append(metrics, def)
-		}
-		for _, def := range metrics {
-			if metricDefMap[def.Name()] != nil {
-				return nil, fmt.Errorf("duplicate metric name %s", def.Name())
-			}
-			metricDefMap[def.Name()] = def
-		}
-	}
-	logs.Info("%d metrics registered", len(metricDefMap))
-	return &MetricsService{
+	ret := &MetricsService{
 		metricRepo:     metricRepo,
-		metricDefMap:   metricDefMap,
+		oMetricRepo:    oMetricRepo,
 		tenantProvider: tenantProvider,
 		buildHelper:    buildHelper,
-	}, nil
+		traceConfig:    traceConfig,
+		pMetrics:       pMetrics,
+	}
+	if err := ret.registerMetrics(); err != nil {
+		return nil, err
+	}
+	if err := ret.checkMetricsValid(); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func (m *MetricsService) registerMetrics() error {
+	metricDefMap := make(map[string]entity.IMetricDefinition)
+	metricDrillDown := make(map[string][]string)
+	for _, metricGroup := range m.pMetrics.MetricGroups {
+		var groupMetrics []entity.IMetricDefinition
+		for _, def := range metricGroup.MetricDefinitions {
+			var metrics []entity.IMetricDefinition
+			if mAdapter, ok := def.(entity.IMetricAdapter); ok {
+				for _, wrapper := range mAdapter.Wrappers() {
+					metrics = append(metrics, wrapper.Wrap(def))
+				}
+			} else {
+				metrics = append(metrics, def)
+			}
+			for _, def := range metrics {
+				if def.Name() == "" {
+					return fmt.Errorf("metric name is blank")
+				}
+				if metricDefMap[def.Name()] != nil {
+					return fmt.Errorf("duplicate metric name %s", def.Name())
+				}
+				metricDefMap[def.Name()] = def
+			}
+			groupMetrics = append(groupMetrics, metrics...)
+		}
+		metricGroup.MetricDefinitions = groupMetrics // expand wrapper metrics
+		for _, def := range groupMetrics {
+			name := def.Name()
+			if _, ok := metricDrillDown[name]; ok {
+				return fmt.Errorf("metric name already belongs %s", name)
+			}
+			metricDrillDown[name] = metricGroup.DrillDownObjects
+		}
+	}
+	m.metricDefMap = metricDefMap
+	m.metricDrillDown = metricDrillDown
+	logs.Info("%d metrics registered", len(metricDefMap))
+	return nil
+}
+
+func (m *MetricsService) checkMetricsValid() error {
+	for _, metricDef := range m.metricDefMap {
+		if err := m.checkMetricValid(metricDef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *MetricsService) GetMetricGroupBy(metricName string) ([]string, error) {
+	metricDef, ok := m.metricDefMap[metricName]
+	if !ok {
+		return nil, fmt.Errorf("metric definition %s not found", metricName)
+	}
+	dims := metricDef.GroupBy()
+	keys := make([]string, 0, len(dims))
+	for _, dim := range dims {
+		if dim.Alias == "" {
+			return nil, fmt.Errorf("%s groupby dimension has no alias", metricName)
+		}
+		keys = append(keys, dim.Alias)
+	}
+	return keys, nil
+}
+
+func (m *MetricsService) checkMetricValid(def entity.IMetricDefinition) error {
+	if _, ok := def.(entity.IMetricConst); ok {
+		return nil // skip const metric
+	} else if compoundMetric, ok := def.(entity.IMetricCompound); ok {
+		// check compound metric all valid
+		for _, nestMetric := range compoundMetric.GetMetrics() {
+			if _, ok := nestMetric.(entity.IMetricConst); ok {
+				continue
+			} else if _, ok := nestMetric.(entity.IMetricCompound); ok {
+				return fmt.Errorf("nested compound metric %s is not allowed", nestMetric.Name())
+			}
+			if m.metricDefMap[nestMetric.Name()] == nil {
+				return fmt.Errorf("metric name %s not registered", nestMetric.Name())
+			}
+		}
+	} else {
+		// check group by valid
+		dimensions := def.GroupBy()
+		for _, dimension := range dimensions {
+			filedName := dimension.Field.FieldName
+			fieldType := dimension.Field.FieldType
+			isValidFieldName := false
+			for _, field := range m.pMetrics.DrillDownObjects {
+				if filedName != field.FieldName {
+					continue
+				} else if fieldType != field.FieldType {
+					continue
+				} else {
+					isValidFieldName = true
+					break
+				}
+			}
+			if !isValidFieldName {
+				return fmt.Errorf("metric name %s group by field %s not valid", def.Name(), filedName)
+			} else if dimension.Alias == "" {
+				return fmt.Errorf("metric name %s group by field %s alias not valid", def.Name(), filedName)
+			}
+		}
+		// check offline expression valid
+		expr := def.OExpression()
+		if expr.AggrType == "" {
+			return fmt.Errorf("metric name %s offline expression aggr type not valid", def.Name())
+		}
+	}
+	return nil
 }
 
 type metricQueryBuilder struct {
@@ -108,6 +252,16 @@ type metricInfo struct {
 func (m *MetricsService) QueryMetrics(ctx context.Context, req *QueryMetricsReq) (*QueryMetricsResp, error) {
 	if len(req.MetricsNames) == 0 {
 		return &QueryMetricsResp{}, nil
+	}
+	qCfg := m.traceConfig.GetMetricQueryConfig(ctx)
+	val := qCfg.SpaceConfigs[strconv.FormatInt(req.WorkspaceID, 10)]
+	if val != nil && val.DisableQuery {
+		return &QueryMetricsResp{}, nil
+	}
+	if req.FilterFields != nil {
+		if err := req.FilterFields.Traverse(processSpecificFilter); err != nil {
+			return nil, errorx.WrapByCode(err, obErrorx.CommercialCommonInvalidParamCodeCode)
+		}
 	}
 	for _, metricName := range req.MetricsNames {
 		mVal, ok := m.metricDefMap[metricName]
@@ -132,6 +286,7 @@ func (m *MetricsService) queryCompoundMetric(ctx context.Context, req *QueryMetr
 	if len(metrics) == 0 {
 		return &QueryMetricsResp{}, nil
 	}
+	logs.CtxInfo(ctx, "query compound metric %s", mDef.Name(), lo.Map(metrics, func(m entity.IMetricDefinition, _ int) string { return m.Name() }))
 	var (
 		metricsResp = make([]*QueryMetricsResp, len(metrics))
 		eGroup      errgroup.Group
@@ -141,17 +296,32 @@ func (m *MetricsService) queryCompoundMetric(ctx context.Context, req *QueryMetr
 		eGroup.Go(func(t int) func() error {
 			return func() error {
 				defer goroutine.Recovery(ctx)
-				sReq := &QueryMetricsReq{
-					PlatformType:    req.PlatformType,
-					WorkspaceID:     req.WorkspaceID,
-					MetricsNames:    []string{metric.Name()},
-					Granularity:     req.Granularity,
-					FilterFields:    req.FilterFields,
-					DrillDownFields: req.DrillDownFields,
-					StartTime:       req.StartTime,
-					EndTime:         req.EndTime,
+				var (
+					resp *QueryMetricsResp
+					err  error
+				)
+				// 常量指标
+				if _, ok := metric.(entity.IMetricConst); ok {
+					resp = &QueryMetricsResp{
+						Metrics: map[string]*entity.Metric{
+							metric.Name(): {
+								Summary: metric.Expression(req.Granularity).Expression,
+							},
+						},
+					}
+				} else {
+					sReq := &QueryMetricsReq{
+						PlatformType:    req.PlatformType,
+						WorkspaceID:     req.WorkspaceID,
+						MetricsNames:    []string{metric.Name()},
+						Granularity:     req.Granularity,
+						FilterFields:    req.FilterFields,
+						DrillDownFields: req.DrillDownFields,
+						StartTime:       req.StartTime,
+						EndTime:         req.EndTime,
+					}
+					resp, err = m.queryMetrics(ctx, sReq)
 				}
-				resp, err := m.queryMetrics(ctx, sReq)
 				lock.Lock()
 				defer lock.Unlock()
 				if err == nil {
@@ -167,7 +337,7 @@ func (m *MetricsService) queryCompoundMetric(ctx context.Context, req *QueryMetr
 	// 复合指标计算...
 	switch mCompound.Operator() {
 	case entity.MetricOperatorDivide:
-		// time_series相除/summary相除
+		// time_series相除/summary相除/time_series除summary
 		return m.divideMetrics(ctx, metricsResp, mCompound.GetMetrics(), mDef)
 	case entity.MetricOperatorPie:
 		// summary指标组合构成饼图
@@ -178,39 +348,76 @@ func (m *MetricsService) queryCompoundMetric(ctx context.Context, req *QueryMetr
 }
 
 func (m *MetricsService) queryMetrics(ctx context.Context, req *QueryMetricsReq) (*QueryMetricsResp, error) {
-	mBuilder, err := m.buildMetricQuery(ctx, req)
+	qCfg := m.traceConfig.GetMetricQueryConfig(ctx)
+	if !qCfg.SupportOffline { // 不支持离线指标
+		return m.queryOnlineMetrics(ctx, req)
+	} else if m.pMetrics.PlatformMetricDefs[req.PlatformType] == nil { // 不在离线指标计算范围内
+		return m.queryOnlineMetrics(ctx, req)
+	}
+	boundary := getDaysBeforeTimeStamp(qCfg.OfflineCriticalPoint)
+	logs.CtxInfo(ctx, "query offline critical point at %d", boundary)
+	if req.StartTime >= boundary {
+		return m.queryOnlineMetrics(ctx, req)
+	} else if req.EndTime < boundary {
+		return m.queryOfflineMetrics(ctx, req)
+	} else {
+		start, end := req.StartTime, req.EndTime
+		req.StartTime, req.EndTime = boundary, end
+		onlineMetric, err := m.queryOnlineMetrics(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		req.StartTime, req.EndTime = start, boundary-1
+		offlineMetric, err := m.queryOfflineMetrics(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return &QueryMetricsResp{
+			Metrics: m.mergeMetrics(onlineMetric.Metrics, offlineMetric.Metrics),
+		}, nil
+	}
+}
+
+func (m *MetricsService) queryOnlineMetrics(ctx context.Context, req *QueryMetricsReq) (*QueryMetricsResp, error) {
+	mBuilder, err := m.buildOnlineMetricQuery(ctx, req)
 	if err != nil {
 		return nil, err
 	} else if mBuilder == nil {
 		return &QueryMetricsResp{}, nil // 不再查询...
 	}
+	st := time.Now()
 	result, err := m.metricRepo.GetMetrics(ctx, mBuilder.mRepoReq)
 	if err != nil {
 		return nil, err
 	}
+	logs.CtxInfo(ctx, "get metrics for %v successfully, cost %v", mBuilder.metricNames, time.Since(st))
 	return &QueryMetricsResp{
 		Metrics: m.formatMetrics(result.Data, mBuilder),
 	}, nil
 }
 
-func (m *MetricsService) buildMetricQuery(ctx context.Context, req *QueryMetricsReq) (*metricQueryBuilder, error) {
+func (m *MetricsService) buildOnlineMetricQuery(ctx context.Context, req *QueryMetricsReq) (*metricQueryBuilder, error) {
 	filter, err := m.buildHelper.BuildPlatformRelatedFilter(ctx, req.PlatformType)
 	if err != nil {
 		return nil, err
 	}
-	tenants, err := m.tenantProvider.GetTenantsByPlatformType(ctx, req.PlatformType)
+	tenants, err := m.tenantProvider.GetMetricTenantsByPlatformType(ctx, req.PlatformType)
 	if err != nil {
 		return nil, err
 	}
 	param := &repo.GetMetricsParam{
-		Tenants: tenants,
-		StartAt: req.StartTime,
-		EndAt:   req.EndTime,
+		WorkSpaceID: strconv.FormatInt(req.WorkspaceID, 10),
+		Tenants:     tenants,
+		StartAt:     req.StartTime,
+		EndAt:       req.EndTime,
 	}
 	mBuilder := &metricQueryBuilder{
-		metricNames:   req.MetricsNames,
-		filter:        filter,
-		spanEnv:       &span_filter.SpanEnv{WorkspaceID: req.WorkspaceID},
+		metricNames: req.MetricsNames,
+		filter:      filter,
+		spanEnv: &span_filter.SpanEnv{
+			WorkspaceID: req.WorkspaceID,
+			Source:      req.Source,
+		},
 		requestFilter: req.FilterFields,
 		granularity:   req.Granularity,
 	}
@@ -239,6 +446,18 @@ func (m *MetricsService) buildMetricQuery(ctx context.Context, req *QueryMetrics
 		})
 	}
 	mBuilder.mRepoReq = param
+	// rewrite filter
+	if req.GroupBySpaceID {
+		_ = param.Filters.Traverse(func(f *loop_span.FilterField) error {
+			if f.FieldName == loop_span.SpanFieldSpaceId { // always true
+				if len(f.Values) != 0 && f.Values[0] == "0" { // space id not passed
+					f.QueryType = ptr.Of(loop_span.QueryTypeEnumExist)
+				}
+			}
+			return nil
+		})
+		mBuilder.mRepoReq.Source = repo.MetricSourceOffline
+	}
 	return mBuilder, nil
 }
 
@@ -328,8 +547,8 @@ func (m *MetricsService) formatMetrics(data []map[string]any, mBuilder *metricQu
 	switch mInfo.mType {
 	case entity.MetricTypeTimeSeries:
 		return m.formatTimeSeriesData(data, mBuilder)
-	case entity.MetricTypeSummary: // 预期不会有聚合, 有就是参数问题
-		return m.formatSummaryData(data)
+	case entity.MetricTypeSummary:
+		return m.formatSummaryData(data, mInfo)
 	case entity.MetricTypePie:
 		return m.formatPieData(data, mInfo)
 	default:
@@ -353,7 +572,7 @@ func (m *MetricsService) formatTimeSeriesData(data []map[string]any, mBuilder *m
 				groupByVals[k] = conv.ToString(v)
 			}
 		}
-		val := "all"
+		val := defaultGroupKey
 		if len(groupByVals) > 0 {
 			if data, err := json.Marshal(groupByVals); err == nil {
 				val = string(data)
@@ -372,7 +591,7 @@ func (m *MetricsService) formatTimeSeriesData(data []map[string]any, mBuilder *m
 	t := entity.NewTimeIntervals(mBuilder.mRepoReq.StartAt, mBuilder.mRepoReq.EndAt, mBuilder.granularity)
 	for metricName := range metricNameMap {
 		if len(ret[metricName].TimeSeries) == 0 {
-			ret[metricName].TimeSeries["all"] = []*entity.MetricPoint{}
+			ret[metricName].TimeSeries[defaultGroupKey] = []*entity.MetricPoint{}
 		}
 		m.fillTimeSeriesData(t, metricName, ret[metricName])
 	}
@@ -403,16 +622,34 @@ func (m *MetricsService) fillTimeSeriesData(intervals []string, metricName strin
 	}
 }
 
-func (m *MetricsService) formatSummaryData(data []map[string]any) map[string]*entity.Metric {
+func (m *MetricsService) formatSummaryData(data []map[string]any, mInfo *metricInfo) map[string]*entity.Metric {
 	ret := make(map[string]*entity.Metric)
-	for _, dataItem := range data {
-		for k, v := range dataItem { // 预期不应该有下钻, 有就是参数问题
+	metricNameMap := lo.Associate(mInfo.mAggregation,
+		func(item *entity.Dimension) (string, bool) {
+			ret[item.Alias] = &entity.Metric{
+				Pie: make(map[string]string),
+			}
+			return item.Alias, true
+		})
+	if len(data) == 0 {
+		return ret
+	} else if len(data) == 1 {
+		isSummaryData := true
+		for k, v := range data[0] {
+			if _, ok := metricNameMap[k]; !ok {
+				isSummaryData = false
+				break
+			}
 			ret[k] = &entity.Metric{
 				Summary: getMetricValue(v),
 			}
 		}
+		if isSummaryData {
+			return ret
+		}
 	}
-	return ret
+	// 正常不应该有下钻, 有下钻就转换为Pie......
+	return m.formatPieData(data, mInfo)
 }
 
 func (m *MetricsService) formatPieData(data []map[string]any, mInfo *metricInfo) map[string]*entity.Metric {
@@ -431,7 +668,7 @@ func (m *MetricsService) formatPieData(data []map[string]any, mInfo *metricInfo)
 				groupByVals[k] = getMetricValue(v)
 			}
 		}
-		val := "all"
+		val := defaultGroupKey
 		if len(groupByVals) > 0 {
 			if data, err := json.Marshal(groupByVals); err == nil {
 				val = string(data)
@@ -470,8 +707,92 @@ func (m *MetricsService) divideMetrics(ctx context.Context, resp []*QueryMetrics
 		ret.Metrics[newMetric.Name()] = &entity.Metric{
 			Summary: divideNumber(numerator.Summary, denominator.Summary),
 		}
+	} else if numerator.TimeSeries != nil && denominator.Summary != "" {
+		ret.Metrics[newMetric.Name()] = &entity.Metric{
+			TimeSeries: divideTimeSeriesBySummary(ctx, numerator.TimeSeries, denominator.Summary),
+		}
 	}
 	return ret, nil
+}
+
+func (m *MetricsService) pieMetrics(ctx context.Context, resp []*QueryMetricsResp, newMetricName string) (*QueryMetricsResp, error) {
+	ret := &QueryMetricsResp{
+		Metrics: make(map[string]*entity.Metric),
+	}
+	ret.Metrics[newMetricName] = &entity.Metric{
+		Pie: make(map[string]string),
+	}
+	for _, r := range resp {
+		if r == nil {
+			continue
+		}
+		for metricName, metricVal := range r.Metrics {
+			ret.Metrics[newMetricName].Pie[metricName] = metricVal.Summary
+		}
+	}
+	return ret, nil
+}
+
+func (m *MetricsService) mergeMetrics(onlineMetrics, offlineMetrics map[string]*entity.Metric) map[string]*entity.Metric {
+	ret := make(map[string]*entity.Metric)
+	metricNames := lo.UniqKeys(onlineMetrics, offlineMetrics)
+	for _, metricName := range metricNames {
+		offlineMetric := offlineMetrics[metricName]
+		onlineMetric := onlineMetrics[metricName]
+		if onlineMetric == nil {
+			ret[metricName] = offlineMetric
+			continue
+		} else if offlineMetric == nil {
+			ret[metricName] = onlineMetric
+			continue
+		}
+		if onlineMetric.TimeSeries != nil || offlineMetric.TimeSeries != nil {
+			ret[metricName] = m.mergeTimeSeriesMetric(onlineMetric, offlineMetric)
+		} else if onlineMetric.Summary != "" || offlineMetric.Summary != "" {
+			ret[metricName] = m.mergeSummaryMetric(onlineMetric, offlineMetric)
+		} else if len(onlineMetric.Pie) > 0 || len(offlineMetric.Pie) > 0 {
+			ret[metricName] = m.mergePieMetric(onlineMetric, offlineMetric)
+		}
+	}
+	return ret
+}
+
+func (m *MetricsService) mergeSummaryMetric(onlineMetric, offlineMetric *entity.Metric) *entity.Metric {
+	return &entity.Metric{
+		Summary: addNumber(onlineMetric.Summary, offlineMetric.Summary),
+	}
+}
+
+func (m *MetricsService) mergeTimeSeriesMetric(onlineMetric, offlineMetric *entity.Metric) *entity.Metric {
+	ret := make(entity.TimeSeries)
+	// order; offline first
+	for k, val := range offlineMetric.TimeSeries {
+		ret[k] = val
+	}
+	for k, val := range onlineMetric.TimeSeries {
+		ret[k] = append(ret[k], val...)
+	}
+	return &entity.Metric{
+		TimeSeries: ret,
+	}
+}
+
+func (m *MetricsService) mergePieMetric(onlineMetric, offlineMetric *entity.Metric) *entity.Metric {
+	// 这里的marhsal实现默认会key排序, 不再次排序
+	ret := make(map[string]string)
+	for k, val := range onlineMetric.Pie {
+		ret[k] = val
+	}
+	for k, val := range offlineMetric.Pie {
+		if ret[k] != "" {
+			ret[k] = addNumber(ret[k], val)
+		} else {
+			ret[k] = val
+		}
+	}
+	return &entity.Metric{
+		Pie: ret,
+	}
 }
 
 func divideNumber(a, b string) string {
@@ -490,6 +811,12 @@ func divideNumber(a, b string) string {
 		return strconv.FormatFloat(numerator/denominator, 'f', -1, 64)
 	}
 	return ""
+}
+
+func addNumber(a, b string) string {
+	numA, _ := strconv.ParseFloat(a, 64)
+	numB, _ := strconv.ParseFloat(b, 64)
+	return strconv.FormatFloat(numA+numB, 'f', -1, 64)
 }
 
 func divideTimeSeries(ctx context.Context, a, b entity.TimeSeries) entity.TimeSeries {
@@ -524,23 +851,22 @@ func divideTimeSeries(ctx context.Context, a, b entity.TimeSeries) entity.TimeSe
 	return ret
 }
 
-// 预期就是多个Summary结果组合
-func (m *MetricsService) pieMetrics(ctx context.Context, resp []*QueryMetricsResp, newMetricName string) (*QueryMetricsResp, error) {
-	ret := &QueryMetricsResp{
-		Metrics: make(map[string]*entity.Metric),
-	}
-	ret.Metrics[newMetricName] = &entity.Metric{
-		Pie: make(map[string]string),
-	}
-	for _, r := range resp {
-		if r == nil {
-			continue
+func divideTimeSeriesBySummary(ctx context.Context, a entity.TimeSeries, b string) entity.TimeSeries {
+	ret := make(entity.TimeSeries)
+	for k, val := range a {
+		ret[k] = make([]*entity.MetricPoint, 0)
+		for i := 0; i < len(val); i++ {
+			dividedVal := divideNumber(val[i].Value, b)
+			if dividedVal == "" {
+				dividedVal = "null" // 无法除, 那就是null
+			}
+			ret[k] = append(ret[k], &entity.MetricPoint{
+				Timestamp: val[i].Timestamp,
+				Value:     dividedVal,
+			})
 		}
-		for metricName, metricVal := range r.Metrics {
-			ret.Metrics[newMetricName].Pie[metricName] = metricVal.Summary
-		}
 	}
-	return ret, nil
+	return ret
 }
 
 func getMetricValue(v any) string {
@@ -549,4 +875,79 @@ func getMetricValue(v any) string {
 		return "null"
 	}
 	return ret
+}
+
+func getDaysBeforeTimeStamp(days int) int64 {
+	now := time.Now()
+	daysBefore := time.Date(now.Year(), now.Month(), now.Day()-days, 0, 0, 0, 0, now.Location())
+	return daysBefore.UnixMilli()
+}
+
+// TODO: 合并，有三个地方实现一样...
+func processSpecificFilter(f *loop_span.FilterField) error {
+	switch f.FieldName {
+	case loop_span.SpanFieldStatus:
+		if err := processStatusFilter(f); err != nil {
+			return err
+		}
+	case loop_span.SpanFieldDuration,
+		loop_span.SpanFieldLatencyFirstResp,
+		loop_span.SpanFieldStartTimeFirstResp,
+		loop_span.SpanFieldStartTimeFirstTokenResp,
+		loop_span.SpanFieldLatencyFirstTokenResp,
+		loop_span.SpanFieldReasoningDuration:
+		if err := processLatencyFilter(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func processStatusFilter(f *loop_span.FilterField) error {
+	if f.QueryType == nil || *f.QueryType != loop_span.QueryTypeEnumIn {
+		return fmt.Errorf("status filter should use in operator")
+	}
+	f.FieldName = loop_span.SpanFieldStatusCode
+	f.FieldType = loop_span.FieldTypeLong
+	checkSuccess, checkError := false, false
+	for _, val := range f.Values {
+		switch val {
+		case loop_span.SpanStatusSuccess:
+			checkSuccess = true
+		case loop_span.SpanStatusError:
+			checkError = true
+		default:
+			return fmt.Errorf("invalid status code field value")
+		}
+	}
+	if checkSuccess && checkError {
+		f.QueryType = ptr.Of(loop_span.QueryTypeEnumAlwaysTrue)
+		f.Values = nil
+	} else if checkSuccess {
+		f.Values = []string{"0"}
+	} else if checkError {
+		f.QueryType = ptr.Of(loop_span.QueryTypeEnumNotIn)
+		f.Values = []string{"0"}
+	} else {
+		return fmt.Errorf("invalid status code query")
+	}
+	return nil
+}
+
+// ms -> us
+func processLatencyFilter(f *loop_span.FilterField) error {
+	if f.FieldType != loop_span.FieldTypeLong {
+		return fmt.Errorf("latency field type should be long ")
+	}
+	micros := make([]string, 0)
+	for _, val := range f.Values {
+		integer, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return fmt.Errorf("fail to parse long value %s, %v", val, err)
+		}
+		integer = timeutil.MillSec2MicroSec(integer)
+		micros = append(micros, strconv.FormatInt(integer, 10))
+	}
+	f.Values = micros
+	return nil
 }

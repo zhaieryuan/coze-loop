@@ -41,6 +41,21 @@ func (m *MockIMetricsService) EXPECT() *MockIMetricsServiceMockRecorder {
 	return m.recorder
 }
 
+// GetMetricGroupBy mocks base method.
+func (m *MockIMetricsService) GetMetricGroupBy(metricName string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetMetricGroupBy", metricName)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetMetricGroupBy indicates an expected call of GetMetricGroupBy.
+func (mr *MockIMetricsServiceMockRecorder) GetMetricGroupBy(metricName any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMetricGroupBy", reflect.TypeOf((*MockIMetricsService)(nil).GetMetricGroupBy), metricName)
+}
+
 // QueryMetrics mocks base method.
 func (m *MockIMetricsService) QueryMetrics(ctx context.Context, req *service.QueryMetricsReq) (*service.QueryMetricsResp, error) {
 	m.ctrl.T.Helper()
@@ -54,4 +69,19 @@ func (m *MockIMetricsService) QueryMetrics(ctx context.Context, req *service.Que
 func (mr *MockIMetricsServiceMockRecorder) QueryMetrics(ctx, req any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryMetrics", reflect.TypeOf((*MockIMetricsService)(nil).QueryMetrics), ctx, req)
+}
+
+// TraverseMetrics mocks base method.
+func (m *MockIMetricsService) TraverseMetrics(ctx context.Context, req *service.TraverseMetricsReq) (*service.TraverseMetricsResp, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TraverseMetrics", ctx, req)
+	ret0, _ := ret[0].(*service.TraverseMetricsResp)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// TraverseMetrics indicates an expected call of TraverseMetrics.
+func (mr *MockIMetricsServiceMockRecorder) TraverseMetrics(ctx, req any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TraverseMetrics", reflect.TypeOf((*MockIMetricsService)(nil).TraverseMetrics), ctx, req)
 }

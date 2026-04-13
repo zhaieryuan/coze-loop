@@ -22,12 +22,15 @@ type EvaluationSetItem struct {
 type Turn struct {
 	ID            int64        `json:"id,omitempty"`
 	FieldDataList []*FieldData `json:"field_data_list,omitempty"`
+	ItemID        int64        `json:"item_id,omitempty"`
+	EvalSetID     int64        `json:"eval_set_id,omitempty"`
 }
 
 type FieldData struct {
 	Key     string   `json:"key,omitempty"`
 	Name    string   `json:"name,omitempty"`
 	Content *Content `json:"content,omitempty"`
+	TraceID string   `json:"trace_id,omitempty"`
 }
 
 type ItemErrorGroup struct {

@@ -13,6 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	component "github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/component"
 	entity "github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/entity"
 	gomock "go.uber.org/mock/gomock"
 )
@@ -97,6 +98,20 @@ func (mr *MockIConfigerMockRecorder) GetErrRetryConf(ctx, spaceID, err any) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetErrRetryConf", reflect.TypeOf((*MockIConfiger)(nil).GetErrRetryConf), ctx, spaceID, err)
 }
 
+// GetEvaluationRecordStorage mocks base method.
+func (m *MockIConfiger) GetEvaluationRecordStorage(ctx context.Context) *component.EvaluationRecordStorage {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetEvaluationRecordStorage", ctx)
+	ret0, _ := ret[0].(*component.EvaluationRecordStorage)
+	return ret0
+}
+
+// GetEvaluationRecordStorage indicates an expected call of GetEvaluationRecordStorage.
+func (mr *MockIConfigerMockRecorder) GetEvaluationRecordStorage(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEvaluationRecordStorage", reflect.TypeOf((*MockIConfiger)(nil).GetEvaluationRecordStorage), ctx)
+}
+
 // GetExptExecConf mocks base method.
 func (m *MockIConfiger) GetExptExecConf(ctx context.Context, spaceID int64) *entity.ExptExecConf {
 	m.ctrl.T.Helper()
@@ -151,4 +166,32 @@ func (m *MockIConfiger) GetMaintainerUserIDs(ctx context.Context) map[string]boo
 func (mr *MockIConfigerMockRecorder) GetMaintainerUserIDs(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMaintainerUserIDs", reflect.TypeOf((*MockIConfiger)(nil).GetMaintainerUserIDs), ctx)
+}
+
+// GetSchedulerAbortCtrl mocks base method.
+func (m *MockIConfiger) GetSchedulerAbortCtrl(ctx context.Context) *entity.SchedulerAbortCtrl {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetSchedulerAbortCtrl", ctx)
+	ret0, _ := ret[0].(*entity.SchedulerAbortCtrl)
+	return ret0
+}
+
+// GetSchedulerAbortCtrl indicates an expected call of GetSchedulerAbortCtrl.
+func (mr *MockIConfigerMockRecorder) GetSchedulerAbortCtrl(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSchedulerAbortCtrl", reflect.TypeOf((*MockIConfiger)(nil).GetSchedulerAbortCtrl), ctx)
+}
+
+// GetTargetTrajectoryConf mocks base method.
+func (m *MockIConfiger) GetTargetTrajectoryConf(ctx context.Context) *entity.TargetTrajectoryConf {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetTargetTrajectoryConf", ctx)
+	ret0, _ := ret[0].(*entity.TargetTrajectoryConf)
+	return ret0
+}
+
+// GetTargetTrajectoryConf indicates an expected call of GetTargetTrajectoryConf.
+func (mr *MockIConfigerMockRecorder) GetTargetTrajectoryConf(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetTargetTrajectoryConf", reflect.TypeOf((*MockIConfiger)(nil).GetTargetTrajectoryConf), ctx)
 }

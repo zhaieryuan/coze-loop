@@ -117,7 +117,7 @@ func TestEvaluationSetItemServiceImpl_UpdateEvaluationSetItem(t *testing.T) {
 			},
 			mockSetup: func() {
 				mockDatasetRPCAdapter.EXPECT().
-					UpdateDatasetItem(gomock.Any(), int64(1), int64(100), int64(1000), gomock.Any()).
+					UpdateDatasetItem(gomock.Any(), int64(1), int64(100), int64(1000), gomock.Any(), gomock.Any()).
 					Return(nil)
 			},
 			wantErr: false,
@@ -130,7 +130,7 @@ func TestEvaluationSetItemServiceImpl_UpdateEvaluationSetItem(t *testing.T) {
 			turns:   []*entity.Turn{},
 			mockSetup: func() {
 				mockDatasetRPCAdapter.EXPECT().
-					UpdateDatasetItem(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+					UpdateDatasetItem(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(errorx.NewByCode(errno.CommonInternalErrorCode))
 			},
 			wantErr: true,
@@ -141,7 +141,7 @@ func TestEvaluationSetItemServiceImpl_UpdateEvaluationSetItem(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.mockSetup()
 
-			err := service.UpdateEvaluationSetItem(context.Background(), tt.spaceID, tt.setID, tt.itemID, tt.turns)
+			err := service.UpdateEvaluationSetItem(context.Background(), tt.spaceID, tt.setID, tt.itemID, tt.turns, nil)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -214,13 +214,14 @@ func TestEvaluationSetItemServiceImpl_ListEvaluationSetItems(t *testing.T) {
 	service := NewEvaluationSetItemServiceImpl(mockDatasetRPCAdapter)
 
 	tests := []struct {
-		name          string
-		param         *entity.ListEvaluationSetItemsParam
-		mockSetup     func()
-		wantItems     []*entity.EvaluationSetItem
-		wantTotal     *int64
-		wantNextToken *string
-		wantErr       bool
+		name            string
+		param           *entity.ListEvaluationSetItemsParam
+		mockSetup       func()
+		wantItems       []*entity.EvaluationSetItem
+		wantTotal       *int64
+		wantFilterTotal *int64
+		wantNextToken   *string
+		wantErr         bool
 	}{
 		{
 			name: "成功列出项目 - 无版本ID",
@@ -234,14 +235,15 @@ func TestEvaluationSetItemServiceImpl_ListEvaluationSetItems(t *testing.T) {
 					ListDatasetItems(gomock.Any(), gomock.Any()).
 					Return([]*entity.EvaluationSetItem{
 						{ID: 1, ItemKey: "item1"},
-					}, gptr.Of[int64](1), gptr.Of("next_token"), nil)
+					}, gptr.Of[int64](1), gptr.Of[int64](1), gptr.Of("next_token"), nil)
 			},
 			wantItems: []*entity.EvaluationSetItem{
 				{ID: 1, ItemKey: "item1"},
 			},
-			wantTotal:     gptr.Of[int64](1),
-			wantNextToken: gptr.Of("next_token"),
-			wantErr:       false,
+			wantTotal:       gptr.Of[int64](1),
+			wantFilterTotal: gptr.Of[int64](1),
+			wantNextToken:   gptr.Of("next_token"),
+			wantErr:         false,
 		},
 		{
 			name: "成功列出项目 - 有版本ID",
@@ -255,12 +257,13 @@ func TestEvaluationSetItemServiceImpl_ListEvaluationSetItems(t *testing.T) {
 					ListDatasetItemsByVersion(gomock.Any(), gomock.Any()).
 					Return([]*entity.EvaluationSetItem{
 						{ID: 1, ItemKey: "item1"},
-					}, gptr.Of[int64](1), nil, nil)
+					}, gptr.Of[int64](1), gptr.Of[int64](1), nil, nil)
 			},
-			wantItems:     []*entity.EvaluationSetItem{{ID: 1, ItemKey: "item1"}},
-			wantTotal:     gptr.Of[int64](1),
-			wantNextToken: nil,
-			wantErr:       false,
+			wantItems:       []*entity.EvaluationSetItem{{ID: 1, ItemKey: "item1"}},
+			wantTotal:       gptr.Of[int64](1),
+			wantFilterTotal: gptr.Of[int64](1),
+			wantNextToken:   nil,
+			wantErr:         false,
 		},
 		{
 			name:      "列出失败 - 参数为空",
@@ -274,7 +277,7 @@ func TestEvaluationSetItemServiceImpl_ListEvaluationSetItems(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.mockSetup()
 
-			items, total, nextToken, err := service.ListEvaluationSetItems(context.Background(), tt.param)
+			items, total, filterTotal, nextToken, err := service.ListEvaluationSetItems(context.Background(), tt.param)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -283,6 +286,7 @@ func TestEvaluationSetItemServiceImpl_ListEvaluationSetItems(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantItems, items)
 			assert.Equal(t, tt.wantTotal, total)
+			assert.Equal(t, tt.wantFilterTotal, filterTotal)
 			assert.Equal(t, tt.wantNextToken, nextToken)
 		})
 	}
@@ -603,4 +607,41 @@ func equalErrorGroups(g1, g2 []*entity.ItemErrorGroup) bool {
 		}
 	}
 	return true
+}
+
+// ---------------- 追加：GetEvaluationSetItemField 的单测 ----------------
+func TestEvaluationSetItemServiceImpl_GetEvaluationSetItemField(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	evaluationSetItemServiceOnce = sync.Once{}
+	mockAdapter := mocks.NewMockIDatasetRPCAdapter(ctrl)
+	service := NewEvaluationSetItemServiceImpl(mockAdapter)
+
+	ctx := context.Background()
+
+	t.Run("成功获取字段数据", func(t *testing.T) {
+		param := &entity.GetEvaluationSetItemFieldParam{SpaceID: 1, EvaluationSetID: 100, ItemPK: 999, FieldName: "field1", TurnID: gptr.Of[int64](1)}
+		expected := &entity.FieldData{Key: "field1", Name: "Field 1", Content: &entity.Content{Text: gptr.Of("value")}}
+		mockAdapter.EXPECT().GetDatasetItemField(gomock.Any(), gomock.Any()).Return(expected, nil)
+		res, err := service.GetEvaluationSetItemField(ctx, param)
+		assert.NoError(t, err)
+		assert.Equal(t, expected, res)
+	})
+
+	t.Run("参数为空返回错误", func(t *testing.T) {
+		res, err := service.GetEvaluationSetItemField(ctx, nil)
+		assert.Nil(t, res)
+		statusErr, ok := errorx.FromStatusError(err)
+		assert.True(t, ok)
+		assert.Equal(t, int32(errno.CommonInternalErrorCode), statusErr.Code())
+	})
+
+	t.Run("RPC返回错误", func(t *testing.T) {
+		param := &entity.GetEvaluationSetItemFieldParam{SpaceID: 1, EvaluationSetID: 100, ItemPK: 999, FieldName: "field1"}
+		mockAdapter.EXPECT().GetDatasetItemField(gomock.Any(), gomock.Any()).Return(nil, errorx.NewByCode(errno.CommonRPCErrorCode))
+		_, err := service.GetEvaluationSetItemField(ctx, param)
+		statusErr, ok := errorx.FromStatusError(err)
+		assert.True(t, ok)
+		assert.Equal(t, int32(errno.CommonRPCErrorCode), statusErr.Code())
+	})
 }

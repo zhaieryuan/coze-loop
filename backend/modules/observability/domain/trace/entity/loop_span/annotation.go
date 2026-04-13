@@ -47,6 +47,9 @@ const (
 	AnnotationTypeCozeFeedback        AnnotationType = "coze_feedback"
 	AnnotationTypeManualDataset       AnnotationType = "manual_dataset"
 	AnnotationTypeOpenAPIFeedback     AnnotationType = "openapi_feedback"
+
+	AnnotationOpenAPIFeedbackFieldPrefix = "feedback_openapi_"
+	AnnotationManualFeedbackFieldPrefix  = "manual_feedback_"
 )
 
 type AnnotationValue struct {
@@ -83,24 +86,24 @@ type ManualDatasetMetadata struct{}
 type AnnotationList []*Annotation
 
 type Annotation struct {
-	ID              string
-	SpanID          string
-	TraceID         string
-	StartTime       time.Time // start time of span
-	WorkspaceID     string
-	AnnotationType  AnnotationType
-	AnnotationIndex []string
-	Key             string
-	Value           AnnotationValue
-	Reasoning       string
-	Corrections     []AnnotationCorrection
-	Metadata        any
-	Status          AnnotationStatus
-	CreatedAt       time.Time
-	CreatedBy       string
-	UpdatedAt       time.Time
-	UpdatedBy       string
-	IsDeleted       bool
+	ID              string                 `json:"id,omitempty"`
+	SpanID          string                 `json:"span_id,omitempty"`
+	TraceID         string                 `json:"trace_id,omitempty"`
+	StartTime       time.Time              `json:"start_time,omitempty"` // start time of span
+	WorkspaceID     string                 `json:"workspace_id,omitempty"`
+	AnnotationType  AnnotationType         `json:"annotation_type,omitempty"`
+	AnnotationIndex []string               `json:"annotation_index,omitempty"`
+	Key             string                 `json:"key,omitempty"`
+	Value           AnnotationValue        `json:"value,omitempty"`
+	Reasoning       string                 `json:"reasoning,omitempty"`
+	Corrections     []AnnotationCorrection `json:"corrections,omitempty"`
+	Metadata        any                    `json:"metadata,omitempty"`
+	Status          AnnotationStatus       `json:"status,omitempty"`
+	CreatedAt       time.Time              `json:"created_at,omitempty"`
+	CreatedBy       string                 `json:"created_by,omitempty"`
+	UpdatedAt       time.Time              `json:"updated_at,omitempty"`
+	UpdatedBy       string                 `json:"updated_by,omitempty"`
+	IsDeleted       bool                   `json:"is_deleted,omitempty"`
 }
 
 func (a *Annotation) GenID() error {
@@ -310,6 +313,16 @@ func (a AnnotationList) Uniq() AnnotationList {
 	return lo.UniqBy(a, func(item *Annotation) string {
 		return item.ID
 	})
+}
+
+func (a AnnotationList) FindByEvaluatorRecordID(evaluatorRecordID int64) (*Annotation, bool) {
+	for _, annotation := range a {
+		meta := annotation.GetAutoEvaluateMetadata()
+		if meta != nil && meta.EvaluatorRecordID == evaluatorRecordID {
+			return annotation, true
+		}
+	}
+	return nil, false
 }
 
 func NewStringValue(v string) AnnotationValue {

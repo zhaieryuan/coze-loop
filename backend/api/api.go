@@ -11,7 +11,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/app/server/binding"
 	"github.com/cloudwego/hertz/pkg/app/server/render"
-	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/processor"
 
 	"github.com/coze-dev/coze-loop/backend/api/handler/coze/loop/apis"
 	"github.com/coze-dev/coze-loop/backend/infra/ck"
@@ -26,6 +25,7 @@ import (
 	"github.com/coze-dev/coze-loop/backend/infra/middleware/validator"
 	"github.com/coze-dev/coze-loop/backend/infra/mq"
 	"github.com/coze-dev/coze-loop/backend/infra/redis"
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/observabilitytraceservice"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/data/lodataset"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/data/lotag"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/evaluation/loeval_set"
@@ -35,8 +35,11 @@ import (
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/foundation/lofile"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/foundation/louser"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/llm/loruntime"
+	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/observability/lotrace"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/prompt/loexecute"
 	"github.com/coze-dev/coze-loop/backend/loop_gen/coze/loop/prompt/lomanage"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe/processor"
+	"github.com/coze-dev/coze-loop/backend/modules/observability/infra/storage"
 	"github.com/coze-dev/coze-loop/backend/pkg/conf"
 	"github.com/coze-dev/coze-loop/backend/pkg/lang/js_conv"
 )
@@ -46,6 +49,7 @@ func Init(
 	idgen idgen.IIDGenerator,
 	db db.Provider,
 	cmdable redis.Cmdable,
+	persistentCmdable redis.PersistentCmdable,
 	configFactory conf.IConfigLoaderFactory,
 	mqFactory mq.IFactory,
 	objectStorage fileserver.ObjectStorage,
@@ -56,6 +60,7 @@ func Init(
 	limiterFactory limiter.IRateLimiterFactory,
 	ckDB ck.Provider,
 	translater i18n.ITranslater,
+	plainLimiterFactory limiter.IPlainRateLimiterFactory,
 ) (*apis.APIHandler, error) {
 	foundationHandler, err := apis.InitFoundationHandler(idgen, db, batchObjectStorage, configFactory)
 	if err != nil {
@@ -87,7 +92,12 @@ func Init(
 		return nil, err
 	}
 
-	evaluationHandler, err := apis.InitEvaluationHandler(
+	var (
+		observabilityHandler *apis.ObservabilityHandler
+		evaluationHandler    *apis.EvaluationHandler
+	)
+
+	evaluationHandler, err = apis.InitEvaluationHandler(
 		ctx, idgen, db, ckDB, cmdable, configFactory, mqFactory,
 		lodataset.NewLocalDatasetService(dataHandler.IDatasetApplication, validator.KiteXValidatorMW),
 		lomanage.NewLocalPromptManageService(promptHandler.PromptManageService),
@@ -102,12 +112,17 @@ func Init(
 		lofile.NewLocalFileService(foundationHandler.FileService),
 		lotag.NewLocalTagService(dataHandler.TagService),
 		objectStorage,
+		batchObjectStorage,
+		plainLimiterFactory,
+		func() observabilitytraceservice.Client {
+			return lotrace.NewLocalTraceService(observabilityHandler.ITraceApplication)
+		},
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	observabilityHandler, err := apis.InitObservabilityHandler(ctx, db, ckDB, meter, mqFactory, configFactory, idgen,
+	observabilityHandler, err = apis.InitObservabilityHandler(ctx, db, ckDB, meter, mqFactory, configFactory, idgen,
 		benefitSvc,
 		lofile.NewLocalFileService(foundationHandler.FileService),
 		loauth.NewLocalAuthService(foundationHandler.AuthService),
@@ -118,11 +133,16 @@ func Init(
 		limiterFactory,
 		lodataset.NewLocalDatasetService(dataHandler.IDatasetApplication),
 		cmdable,
+		persistentCmdable,
+		storage.NewTraceStorageProvider(),
 		loexpt.NewLocalExperimentService(evaluationHandler.IExperimentApplication),
 		processor.TaskProcessor{},
 		0,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if err = observabilityHandler.RunTaskScheduleTask(ctx); err != nil {
 		return nil, err
 	}
 	observabilityHandler.RunAsync(ctx)

@@ -231,6 +231,7 @@ func UsageDO2DTO(src *entity.EvalTargetUsage) *eval_target.EvalTargetUsage {
 	return &eval_target.EvalTargetUsage{
 		InputTokens:  src.InputTokens,
 		OutputTokens: src.OutputTokens,
+		TotalTokens:  src.TotalTokens,
 	}
 }
 
@@ -251,6 +252,7 @@ func UsageDTO2DO(src *eval_target.EvalTargetUsage) *entity.EvalTargetUsage {
 	return &entity.EvalTargetUsage{
 		InputTokens:  src.InputTokens,
 		OutputTokens: src.OutputTokens,
+		TotalTokens:  src.TotalTokens,
 	}
 }
 
@@ -288,7 +290,18 @@ func ToSPIContentDO(spiContent *spi.Content) *entity.Content {
 			URL: spiContent.Image.URL,
 		}
 	}
-
+	var audio *entity.Audio
+	if spiContent.Audio != nil {
+		audio = &entity.Audio{
+			URL: spiContent.Audio.URL,
+		}
+	}
+	var video *entity.Video
+	if spiContent.Video != nil {
+		video = &entity.Video{
+			URL: spiContent.Video.URL,
+		}
+	}
 	var multiPart []*entity.Content
 	if spiContent.MultiPart != nil {
 		multiPart = make([]*entity.Content, 0, len(spiContent.MultiPart))
@@ -301,6 +314,8 @@ func ToSPIContentDO(spiContent *spi.Content) *entity.Content {
 		ContentType: contentType,
 		Text:        spiContent.Text,
 		Image:       image,
+		Audio:       audio,
+		Video:       video,
 		MultiPart:   multiPart,
 	}
 }
@@ -311,6 +326,10 @@ func toSPIContentTypeDO(spiContentType spi.ContentType) entity.ContentType {
 		return entity.ContentTypeText
 	case spi.ContentTypeImage:
 		return entity.ContentTypeImage
+	case spi.ContentTypeAudio:
+		return entity.ContentTypeAudio
+	case spi.ContentTypeVideo:
+		return entity.ContentTypeVideo
 	case spi.ContentTypeMultiPart:
 		return entity.ContentTypeMultipart
 	default:
@@ -330,24 +349,30 @@ func ToTargetRunStatsDO(status spi.InvokeEvalTargetStatus) entity.EvalTargetRunS
 }
 
 func ToInvokeOutputDataDO(req *openapi.ReportEvalTargetInvokeResultRequest) *entity.EvalTargetOutputData {
-	switch req.GetStatus() {
-	case spi.InvokeEvalTargetStatus_SUCCESS:
-		output := req.GetOutput()
-		usage := req.GetUsage()
+	output := req.GetOutput()
+	usage := req.GetUsage()
 
-		outputFields := make(map[string]*entity.Content)
+	outputFields := make(map[string]*entity.Content)
+	if output != nil {
 		if output.ActualOutput != nil {
 			outputFields[consts.OutputSchemaKey] = ToSPIContentDO(output.ActualOutput)
 		}
-
-		var evalTargetUsage *entity.EvalTargetUsage
-		if usage.InputTokens != nil || usage.OutputTokens != nil {
-			evalTargetUsage = &entity.EvalTargetUsage{
-				InputTokens:  getInt64Value(usage.InputTokens),
-				OutputTokens: getInt64Value(usage.OutputTokens),
-			}
+		for k, v := range output.ExtOutput {
+			outputFields[k] = ToSPIContentDO(v)
 		}
+	}
 
+	var evalTargetUsage *entity.EvalTargetUsage
+	if usage != nil && (usage.InputTokens != nil || usage.OutputTokens != nil) {
+		evalTargetUsage = &entity.EvalTargetUsage{
+			InputTokens:  getInt64Value(usage.InputTokens),
+			OutputTokens: getInt64Value(usage.OutputTokens),
+		}
+		evalTargetUsage.TotalTokens = evalTargetUsage.InputTokens + evalTargetUsage.OutputTokens
+	}
+
+	switch req.GetStatus() {
+	case spi.InvokeEvalTargetStatus_SUCCESS:
 		return &entity.EvalTargetOutputData{
 			OutputFields:       outputFields,
 			EvalTargetUsage:    evalTargetUsage,
@@ -364,6 +389,8 @@ func ToInvokeOutputDataDO(req *openapi.ReportEvalTargetInvokeResultRequest) *ent
 			}
 		}
 		return &entity.EvalTargetOutputData{
+			OutputFields:       outputFields,
+			EvalTargetUsage:    evalTargetUsage,
 			EvalTargetRunError: evalTargetRunError,
 		}
 

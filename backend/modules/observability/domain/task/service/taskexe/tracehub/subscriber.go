@@ -6,12 +6,8 @@ package tracehub
 import (
 	"context"
 	"math/rand"
-	"sync"
 	"time"
 
-	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/observability/domain/task"
-	"github.com/coze-dev/coze-loop/backend/modules/observability/application/convertor"
-	tconv "github.com/coze-dev/coze-loop/backend/modules/observability/application/convertor/task"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/entity"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/repo"
 	"github.com/coze-dev/coze-loop/backend/modules/observability/domain/task/service/taskexe"
@@ -26,36 +22,26 @@ import (
 
 type spanSubscriber struct {
 	taskID       int64
-	sync.RWMutex // protect t, buf
-	t            *task.Task
-	tr           *task.TaskRun
+	t            *entity.ObservabilityTask
+	tr           *entity.TaskRun
 	processor    taskexe.Processor
-	bufCap       int // max buffer size
-
-	flushWait        sync.WaitGroup
-	maxFlushInterval time.Duration
-	taskRepo         repo.ITaskRepo
-	runType          task.TaskRunType
-	buildHelper      service.TraceFilterProcessorBuilder
+	tenants      []string
+	taskRepo     repo.ITaskRepo
+	runType      entity.TaskRunType
+	buildHelper  service.TraceFilterProcessorBuilder
+	traceService service.ITraceService
 }
 
 // Sampled determines whether a span is sampled based on the sampling rate; the sample size will be validated during flush.
 func (s *spanSubscriber) Sampled() bool {
-	t := s.getTask()
-	if t == nil || t.Rule == nil || t.Rule.Sampler == nil {
+	if s.t == nil || s.t.Sampler == nil {
 		return false
 	}
 
 	const base = 10000
-	threshold := int64(float64(base) * t.GetRule().GetSampler().GetSampleRate())
+	threshold := int64(float64(base) * s.t.Sampler.SampleRate)
 	r := rand.Int63n(base)
 	return r <= threshold
-}
-
-func (s *spanSubscriber) getTask() *task.Task {
-	s.RLock()
-	defer s.RUnlock()
-	return s.t
 }
 
 func combineFilters(filters ...*loop_span.FilterFields) *loop_span.FilterFields {
@@ -77,11 +63,11 @@ func combineFilters(filters ...*loop_span.FilterFields) *loop_span.FilterFields 
 // Match checks whether the span matches the task filter.
 func (s *spanSubscriber) Match(ctx context.Context, span *loop_span.Span) (bool, error) {
 	task := s.t
-	if task == nil || task.Rule == nil {
+	if task == nil {
 		return false, nil
 	}
 
-	filters := s.buildSpanFilters(ctx, task)
+	filters := s.buildSpanFilters(ctx, task, span)
 	if !filters.Satisfied(span) {
 		return false, nil
 	}
@@ -89,24 +75,47 @@ func (s *spanSubscriber) Match(ctx context.Context, span *loop_span.Span) (bool,
 	return true, nil
 }
 
-func (s *spanSubscriber) buildSpanFilters(ctx context.Context, taskConfig *task.Task) *loop_span.FilterFields {
+func (s *spanSubscriber) buildSpanFilters(ctx context.Context, taskDO *entity.ObservabilityTask, span *loop_span.Span) *loop_span.FilterFields {
 	// Additional filters can be constructed based on task configuration if needed.
 	// Simplified handling here: returning nil means no extra filters are applied.
 	filters := &loop_span.FilterFields{}
-	platformFilter, err := s.buildHelper.BuildPlatformRelatedFilter(ctx, loop_span.PlatformType(taskConfig.GetRule().GetSpanFilters().GetPlatformType()))
+	platformFilter, err := s.buildHelper.BuildPlatformRelatedFilter(ctx, taskDO.SpanFilter.PlatformType)
 	if err != nil {
 		return filters
 	}
 	builtinFilter, err := buildBuiltinFilters(ctx, platformFilter, &ListSpansReq{
-		WorkspaceID:  taskConfig.GetWorkspaceID(),
-		SpanListType: loop_span.SpanListType(taskConfig.GetRule().GetSpanFilters().GetSpanListType()),
+		WorkspaceID:  taskDO.WorkspaceID,
+		SpanListType: taskDO.SpanFilter.SpanListType,
 	})
 	if err != nil {
 		return filters
 	}
-	filters = combineFilters(builtinFilter, convertor.FilterFieldsDTO2DO(taskConfig.GetRule().GetSpanFilters().GetFilters()))
+	if err = taskDO.SpanFilter.Filters.Traverse(processSpecificFilter); err != nil {
+		logs.CtxError(ctx, "traverse filter fields failed, task_id=%d, err=%v", taskDO.ID, err)
+		return filters
+	}
+	var tenantFilter *loop_span.FilterFields = nil
+	if len(span.GetTenant()) > 0 {
+		tenantFilter = buildTenantFilter(s.tenants)
+	}
+	filters = combineFilters(builtinFilter, &taskDO.SpanFilter.Filters, tenantFilter)
 
 	return filters
+}
+
+func buildTenantFilter(tenants []string) *loop_span.FilterFields {
+	return &loop_span.FilterFields{
+		FilterFields: []*loop_span.FilterField{
+			{
+				FieldName: loop_span.SpanFieldTenant,
+				FieldType: loop_span.FieldTypeString,
+				Values:    tenants,
+				QueryType: ptr.Of(loop_span.QueryTypeEnumIn),
+				IsSystem:  true,
+			},
+		},
+		QueryAndOr: ptr.Of(loop_span.QueryAndOrEnumAnd),
+	}
 }
 
 func buildBuiltinFilters(ctx context.Context, f span_filter.Filter, req *ListSpansReq) (*loop_span.FilterFields, error) {
@@ -153,8 +162,8 @@ func buildBuiltinFilters(ctx context.Context, f span_filter.Filter, req *ListSpa
 }
 
 func (s *spanSubscriber) Creative(ctx context.Context, runStartAt, runEndAt int64) error {
-	err := s.processor.OnCreateTaskRunChange(ctx, taskexe.OnCreateTaskRunChangeReq{
-		CurrentTask: tconv.TaskDTO2DO(s.t, "", nil),
+	err := s.processor.OnTaskRunCreated(ctx, taskexe.OnTaskRunCreatedReq{
+		CurrentTask: s.t,
 		RunType:     s.runType,
 		RunStartAt:  runStartAt,
 		RunEndAt:    runEndAt,
@@ -168,22 +177,27 @@ func (s *spanSubscriber) Creative(ctx context.Context, runStartAt, runEndAt int6
 func (s *spanSubscriber) AddSpan(ctx context.Context, span *loop_span.Span) error {
 	var taskRunConfig *entity.TaskRun
 	var err error
-	if s.runType == task.TaskRunTypeNewData {
-		taskRunConfig, err = s.taskRepo.GetLatestNewDataTaskRun(ctx, nil, s.t.GetID())
+	if s.runType == entity.TaskRunTypeNewData {
+		taskRunConfig, err = s.taskRepo.GetLatestNewDataTaskRun(ctx, nil, s.t.ID)
 		if err != nil {
-			logs.CtxWarn(ctx, "get latest new data task run failed, task_id=%d, err: %v", s.t.GetID(), err)
+			logs.CtxWarn(ctx, "get latest new data task run failed, task_id=%d, err: %v", s.t.ID, err)
 			return err
 		}
 	} else {
-		taskRunConfig, err = s.taskRepo.GetBackfillTaskRun(ctx, nil, s.t.GetID())
+		taskRunConfig, err = s.taskRepo.GetBackfillTaskRun(ctx, nil, s.t.ID)
 		if err != nil {
-			logs.CtxWarn(ctx, "get backfill task run failed, task_id=%d, err: %v", s.t.GetID(), err)
+			logs.CtxWarn(ctx, "get backfill task run failed, task_id=%d, err: %v", s.t.ID, err)
 			return err
 		}
 	}
 
 	if taskRunConfig == nil {
 		logs.CtxWarn(ctx, "no taskRunConfig：%v", taskRunConfig)
+		return nil
+	}
+	// 仅允许处于 running 状态的 TaskRun 继续触发处理器，避免已结束 run 仍被触发
+	if taskRunConfig.RunStatus != entity.TaskRunStatusRunning {
+		logs.CtxInfo(ctx, "skip non-running task run: task_id=%d, run_id=%d, status=%s, span_id=%s", s.t.ID, taskRunConfig.ID, taskRunConfig.RunStatus, span.SpanID)
 		return nil
 	}
 
@@ -194,8 +208,17 @@ func (s *spanSubscriber) AddSpan(ctx context.Context, span *loop_span.Span) erro
 		logs.CtxWarn(ctx, "span start time is before task cycle start time, trace_id=%s, span_id=%s", span.TraceID, span.SpanID)
 		return nil
 	}
-	trigger := &taskexe.Trigger{Task: tconv.TaskDTO2DO(s.t, "", nil), Span: span, TaskRun: taskRunConfig}
-	logs.CtxInfo(ctx, "invoke processor, trigger: %v", trigger)
+	trigger := &taskexe.Trigger{Task: s.t, Span: span, TaskRun: taskRunConfig}
+	logs.CtxDebug(ctx, "invoke processor, trigger: %v", trigger)
+	// New Data 在这里处理
+	// Back fill 在前置批量处理
+	if s.runType == entity.TaskRunTypeNewData {
+		err := s.traceService.MergeHistoryMessagesByRespIDBatch(ctx, []*loop_span.Span{span}, s.t.GetPlatformType())
+		if err != nil {
+			logs.CtxError(ctx, "merge history messages failed, task_id=%d, span_id=%s err: %v", s.t.ID, span.SpanID, err)
+			return err
+		}
+	}
 	err = s.processor.Invoke(ctx, trigger)
 	if err != nil {
 		logs.CtxWarn(ctx, "invoke processor failed, trace_id=%s, span_id=%s, err: %v", span.TraceID, span.SpanID, err)

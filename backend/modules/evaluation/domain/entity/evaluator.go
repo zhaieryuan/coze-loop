@@ -13,20 +13,63 @@ type Evaluator struct {
 	LatestVersion  string
 	BaseInfo       *BaseInfo
 
-	PromptEvaluatorVersion *PromptEvaluatorVersion
-	CodeEvaluatorVersion   *CodeEvaluatorVersion
+	Builtin               bool
+	EvaluatorInfo         *EvaluatorInfo
+	BuiltinVisibleVersion string
+	BoxType               EvaluatorBoxType                                      `json:"box_type"`
+	Tags                  map[EvaluatorTagLangType]map[EvaluatorTagKey][]string `json:"tags"`
+
+	PromptEvaluatorVersion    *PromptEvaluatorVersion
+	CodeEvaluatorVersion      *CodeEvaluatorVersion
+	CustomRPCEvaluatorVersion *CustomRPCEvaluatorVersion
+	AgentEvaluatorVersion     *AgentEvaluatorVersion
 }
+
+type EvaluatorInfo struct {
+	Benchmark     *string `json:"benchmark"`
+	Vendor        *string `json:"vendor"`
+	VendorURL     *string `json:"vendor_url"`
+	UserManualURL *string `json:"user_manual_url"`
+}
+
+type EvaluatorBoxType int64
+
+const (
+	EvaluatorBoxTypeWhite EvaluatorBoxType = 1
+	EvaluatorBoxTypeBlack EvaluatorBoxType = 2
+)
 
 type EvaluatorType int64
 
 const (
-	EvaluatorTypePrompt EvaluatorType = 1
-	EvaluatorTypeCode   EvaluatorType = 2
+	EvaluatorTypePrompt    EvaluatorType = 1
+	EvaluatorTypeCode      EvaluatorType = 2
+	EvaluatorTypeCustomRPC EvaluatorType = 3
+	EvaluatorTypeAgent     EvaluatorType = 4
 )
 
 var EvaluatorTypeSet = map[EvaluatorType]struct{}{
-	EvaluatorTypePrompt: {},
-	EvaluatorTypeCode:   {},
+	EvaluatorTypePrompt:    {},
+	EvaluatorTypeCode:      {},
+	EvaluatorTypeCustomRPC: {},
+	EvaluatorTypeAgent:     {},
+}
+
+func (e *Evaluator) IsAsync() bool {
+	return e.EvaluatorType == EvaluatorTypeAgent
+}
+
+// UpdateEvaluatorMetaRequest 用于更新评估器元信息的参数
+type UpdateEvaluatorMetaRequest struct {
+	ID                    int64
+	SpaceID               int64
+	Name                  *string
+	Description           *string
+	Builtin               *bool
+	EvaluatorInfo         *EvaluatorInfo
+	BuiltinVisibleVersion *string
+	BoxType               *EvaluatorBoxType
+	UpdatedBy             string
 }
 
 // GetEvaluatorVersionID 获取评估器版本ID
@@ -39,6 +82,14 @@ func (e *Evaluator) GetEvaluatorVersionID() int64 {
 	case EvaluatorTypeCode:
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.GetID()
+		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.GetID()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.GetID()
 		}
 	default:
 		return 0
@@ -57,6 +108,14 @@ func (e *Evaluator) GetVersion() string {
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.GetVersion()
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.GetVersion()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.GetVersion()
+		}
 	default:
 		return ""
 	}
@@ -74,6 +133,14 @@ func (e *Evaluator) GetEvaluatorID() int64 {
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.GetEvaluatorID()
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.GetEvaluatorID()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.GetEvaluatorID()
+		}
 	default:
 		return 0
 	}
@@ -90,6 +157,14 @@ func (e *Evaluator) GetSpaceID() int64 {
 	case EvaluatorTypeCode:
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.GetSpaceID()
+		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.GetSpaceID()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.GetSpaceID()
 		}
 	default:
 		return 0
@@ -113,6 +188,14 @@ func (e *Evaluator) GetEvaluatorVersionDescription() string {
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.GetDescription()
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.GetDescription()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.GetDescription()
+		}
 	default:
 		return ""
 	}
@@ -129,6 +212,14 @@ func (e *Evaluator) GetBaseInfo() *BaseInfo {
 	case EvaluatorTypeCode:
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.GetBaseInfo()
+		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.GetBaseInfo()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.GetBaseInfo()
 		}
 	default:
 		return nil
@@ -173,6 +264,14 @@ func (e *Evaluator) ValidateInput(input *EvaluatorInputData) error {
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.ValidateInput(input)
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.ValidateInput(input)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.ValidateInput(input)
+		}
 	default:
 		return nil
 	}
@@ -189,6 +288,14 @@ func (e *Evaluator) ValidateBaseInfo() error {
 	case EvaluatorTypeCode:
 		if e.CodeEvaluatorVersion != nil {
 			return e.CodeEvaluatorVersion.ValidateBaseInfo()
+		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.ValidateBaseInfo()
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.ValidateBaseInfo()
 		}
 	default:
 		return nil
@@ -207,6 +314,14 @@ func (e *Evaluator) SetEvaluatorVersionID(id int64) {
 		if e.CodeEvaluatorVersion != nil {
 			e.CodeEvaluatorVersion.SetID(id)
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			e.CustomRPCEvaluatorVersion.SetID(id)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			e.AgentEvaluatorVersion.SetID(id)
+		}
 	default:
 		return
 	}
@@ -222,6 +337,14 @@ func (e *Evaluator) SetVersion(version string) {
 	case EvaluatorTypeCode:
 		if e.CodeEvaluatorVersion != nil {
 			e.CodeEvaluatorVersion.SetVersion(version)
+		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			e.CustomRPCEvaluatorVersion.SetVersion(version)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			e.AgentEvaluatorVersion.SetVersion(version)
 		}
 	default:
 		return
@@ -244,6 +367,14 @@ func (e *Evaluator) SetEvaluatorVersionDescription(description string) {
 		if e.CodeEvaluatorVersion != nil {
 			e.CodeEvaluatorVersion.SetDescription(description)
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			e.CustomRPCEvaluatorVersion.SetDescription(description)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			e.AgentEvaluatorVersion.SetDescription(description)
+		}
 	default:
 		return
 	}
@@ -259,6 +390,14 @@ func (e *Evaluator) SetBaseInfo(baseInfo *BaseInfo) {
 	case EvaluatorTypeCode:
 		if e.CodeEvaluatorVersion != nil {
 			e.CodeEvaluatorVersion.SetBaseInfo(baseInfo)
+		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			e.CustomRPCEvaluatorVersion.SetBaseInfo(baseInfo)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			e.AgentEvaluatorVersion.SetBaseInfo(baseInfo)
 		}
 	default:
 		return
@@ -312,6 +451,14 @@ func (e *Evaluator) SetEvaluatorID(evaluatorID int64) {
 		if e.CodeEvaluatorVersion != nil {
 			e.CodeEvaluatorVersion.SetEvaluatorID(evaluatorID)
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			e.CustomRPCEvaluatorVersion.SetEvaluatorID(evaluatorID)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			e.AgentEvaluatorVersion.SetEvaluatorID(evaluatorID)
+		}
 	default:
 		return
 	}
@@ -328,18 +475,68 @@ func (e *Evaluator) SetSpaceID(spaceID int64) {
 		if e.CodeEvaluatorVersion != nil {
 			e.CodeEvaluatorVersion.SetSpaceID(spaceID)
 		}
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			e.CustomRPCEvaluatorVersion.SetSpaceID(spaceID)
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			e.AgentEvaluatorVersion.SetSpaceID(spaceID)
+		}
 	default:
 		return
 	}
 }
 
 func (e *Evaluator) SetEvaluatorVersion(version *Evaluator) {
+	if version == nil {
+		return
+	}
 	switch e.EvaluatorType {
 	case EvaluatorTypePrompt:
 		e.PromptEvaluatorVersion = version.PromptEvaluatorVersion
 	case EvaluatorTypeCode:
 		e.CodeEvaluatorVersion = version.CodeEvaluatorVersion
+	case EvaluatorTypeCustomRPC:
+		e.CustomRPCEvaluatorVersion = version.CustomRPCEvaluatorVersion
+	case EvaluatorTypeAgent:
+		e.AgentEvaluatorVersion = version.AgentEvaluatorVersion
 	default:
 		return
 	}
+}
+
+func (e *Evaluator) GetRateLimit() *RateLimit {
+	switch e.EvaluatorType {
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.RateLimit
+		}
+	}
+	return nil
+}
+
+func (e *Evaluator) GetInputSchemas() []*ArgsSchema {
+	switch e.EvaluatorType {
+	case EvaluatorTypePrompt:
+		if e.PromptEvaluatorVersion != nil {
+			return e.PromptEvaluatorVersion.InputSchemas
+		}
+	case EvaluatorTypeCode:
+		return nil
+	case EvaluatorTypeCustomRPC:
+		if e.CustomRPCEvaluatorVersion != nil {
+			return e.CustomRPCEvaluatorVersion.InputSchemas
+		}
+	case EvaluatorTypeAgent:
+		if e.AgentEvaluatorVersion != nil {
+			return e.AgentEvaluatorVersion.InputSchemas
+		}
+	}
+	return nil
+}
+
+type EvaluatorRunConfig struct {
+	Env                   *string       `json:"env,omitempty"`
+	EvaluatorRuntimeParam *RuntimeParam `json:"evaluator_runtime_param,omitempty"`
 }

@@ -6,8 +6,10 @@ package evaluation_set
 import (
 	"testing"
 
+	"github.com/bytedance/gg/gptr"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/data/domain/dataset_job"
 	common "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain_openapi/common"
 	openapi_eval_set "github.com/coze-dev/coze-loop/backend/kitex_gen/coze/loop/evaluation/domain_openapi/eval_set"
 	"github.com/coze-dev/coze-loop/backend/modules/evaluation/domain/entity"
@@ -47,6 +49,11 @@ func TestConvertOpenAPIContentTypeToDO(t *testing.T) {
 			name:     "multi-part",
 			input:    ptr[common.ContentType](common.ContentTypeMultiPart),
 			expected: entity.ContentTypeMultipart,
+		},
+		{
+			name:     "multi-part-variable",
+			input:    ptr[common.ContentType](common.ContentTypeMultiPartVariable),
+			expected: entity.ContentTypeMultipartVariable,
 		},
 		{
 			name:     "unknown",
@@ -100,7 +107,7 @@ func TestConvertDOContentTypeToOpenAPI(t *testing.T) {
 		{
 			name:     "multipart variable",
 			input:    entity.ContentTypeMultipartVariable,
-			expected: ptr[common.ContentType](common.ContentTypeMultiPart),
+			expected: ptr[common.ContentType](common.ContentTypeMultiPartVariable),
 		},
 		{
 			name:     "unknown",
@@ -383,8 +390,11 @@ func TestBaseInfoAndUserInfoConversions(t *testing.T) {
 	assert.Nil(t, OpenAPIUserInfoDO2DTO(nil))
 }
 
+// TestOpenAPIItemConversions tests the conversion between EvaluationSetItem DO and DTO.
 func TestOpenAPIItemConversions(t *testing.T) {
 	t.Parallel()
+
+	evalSetID := int64(1)
 
 	imageName := "image"
 	imageURL := "url"
@@ -393,6 +403,18 @@ func TestOpenAPIItemConversions(t *testing.T) {
 	multipartContent := &common.Content{
 		ContentType: ptr[common.ContentType](common.ContentTypeText),
 		Text:        ptr("part"),
+	}
+	multipartContent1 := &common.Content{
+		ContentType: ptr[common.ContentType](common.ContentTypeAudio),
+		Audio: &common.Audio{
+			Name: &imageName,
+		},
+	}
+	multipartContent2 := &common.Content{
+		ContentType: ptr[common.ContentType](common.ContentTypeVideo),
+		Video: &common.Video{
+			Name: &imageName,
+		},
 	}
 
 	contentDTO := &common.Content{
@@ -403,7 +425,7 @@ func TestOpenAPIItemConversions(t *testing.T) {
 			URL:      &imageURL,
 			ThumbURL: &thumbURL,
 		},
-		MultiPart: []*common.Content{multipartContent},
+		MultiPart: []*common.Content{multipartContent, multipartContent1, multipartContent2},
 	}
 
 	turnDTO := &openapi_eval_set.Turn{
@@ -422,7 +444,7 @@ func TestOpenAPIItemConversions(t *testing.T) {
 		Turns:   []*openapi_eval_set.Turn{turnDTO},
 	}
 
-	do := OpenAPIItemDTO2DO(itemDTO)
+	do := OpenAPIItemDTO2DO(evalSetID, itemDTO)
 	expectedContent := &entity.Content{
 		ContentType: ptr(entity.ContentTypeMultipart),
 		Text:        &text,
@@ -435,6 +457,18 @@ func TestOpenAPIItemConversions(t *testing.T) {
 			{
 				ContentType: ptr(entity.ContentTypeText),
 				Text:        ptr("part"),
+			},
+			{
+				ContentType: ptr(entity.ContentTypeAudio),
+				Audio: &entity.Audio{
+					Name: &imageName,
+				},
+			},
+			{
+				ContentType: ptr(entity.ContentTypeVideo),
+				Video: &entity.Video{
+					Name: &imageName,
+				},
 			},
 		},
 	}
@@ -451,18 +485,20 @@ func TestOpenAPIItemConversions(t *testing.T) {
 						Content: expectedContent,
 					},
 				},
+				ItemID:    2,
+				EvalSetID: evalSetID,
 			},
 		},
 	}
 	assert.Equal(t, expectedDO, do)
-	assert.Nil(t, OpenAPIItemDTO2DO(nil))
-	assert.Nil(t, OpenAPIItemDTO2DOs(nil))
-	assert.Equal(t, []*entity.EvaluationSetItem{expectedDO}, OpenAPIItemDTO2DOs([]*openapi_eval_set.EvaluationSetItem{itemDTO}))
+	assert.Nil(t, OpenAPIItemDTO2DO(0, nil))
+	assert.Nil(t, OpenAPIItemDTO2DOs(0, nil))
+	assert.Equal(t, []*entity.EvaluationSetItem{expectedDO}, OpenAPIItemDTO2DOs(evalSetID, []*openapi_eval_set.EvaluationSetItem{itemDTO}))
 
-	assert.Equal(t, expectedDO.Turns[0], OpenAPITurnDTO2DO(turnDTO))
-	assert.Nil(t, OpenAPITurnDTO2DO(nil))
-	assert.Equal(t, []*entity.Turn{expectedDO.Turns[0]}, OpenAPITurnDTO2DOs([]*openapi_eval_set.Turn{turnDTO}))
-	assert.Nil(t, OpenAPITurnDTO2DOs(nil))
+	assert.Equal(t, expectedDO.Turns[0], OpenAPITurnDTO2DO(evalSetID, expectedDO.ItemID, turnDTO))
+	assert.Nil(t, OpenAPITurnDTO2DO(0, 0, nil))
+	assert.Equal(t, []*entity.Turn{expectedDO.Turns[0]}, OpenAPITurnDTO2DOs(evalSetID, expectedDO.ItemID, []*openapi_eval_set.Turn{turnDTO}))
+	assert.Nil(t, OpenAPITurnDTO2DOs(0, 0, nil))
 
 	assert.Equal(t, expectedDO.Turns[0].FieldDataList[0], OpenAPIFieldDataDTO2DO(turnDTO.FieldDatas[0]))
 	assert.Nil(t, OpenAPIFieldDataDTO2DO(nil))
@@ -504,6 +540,10 @@ func TestOpenAPIItemDOToDTOConversions(t *testing.T) {
 			Format: &audioFormat,
 			URL:    &audioURL,
 		},
+		Video: &entity.Video{
+			Name: &imageName,
+			URL:  &imageURL,
+		},
 	}
 
 	do := &entity.EvaluationSetItem{
@@ -541,6 +581,8 @@ func TestOpenAPIItemDOToDTOConversions(t *testing.T) {
 								URL:      &imageURL,
 								ThumbURL: &thumbURL,
 							},
+							Audio: &common.Audio{Format: &audioFormat, URL: &audioURL},
+							Video: &common.Video{Name: &imageName, URL: &imageURL},
 							MultiPart: []*common.Content{
 								{
 									ContentType: ptr[common.ContentType](common.ContentTypeText),
@@ -655,4 +697,386 @@ func TestDatasetItemOutputConversions(t *testing.T) {
 	assert.Nil(t, OpenAPIDatasetItemOutputDO2DTO(nil))
 	assert.Equal(t, []*openapi_eval_set.DatasetItemOutput{expected}, OpenAPIDatasetItemOutputDO2DTOs([]*entity.DatasetItemOutput{do}))
 	assert.Nil(t, OpenAPIDatasetItemOutputDO2DTOs(nil))
+}
+
+func TestConvertDOSchemaKeyToOpenAPI(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *entity.SchemaKey
+		expected *openapi_eval_set.SchemaKey
+	}{
+		{"nil input", nil, nil},
+		{"string", ptr(entity.SchemaKey_String), ptr(openapi_eval_set.SchemaKeyString)},
+		{"integer", ptr(entity.SchemaKey_Integer), ptr(openapi_eval_set.SchemaKeyInteger)},
+		{"float", ptr(entity.SchemaKey_Float), ptr(openapi_eval_set.SchemaKeyFloat)},
+		{"bool", ptr(entity.SchemaKey_Bool), ptr(openapi_eval_set.SchemaKeyBool)},
+		{"trajectory", ptr(entity.SchemaKey_Trajectory), ptr(openapi_eval_set.SchemaKeyTrajectory)},
+		{"message (unknown mapping)", ptr(entity.SchemaKey_Message), nil},
+		{"single choice (unknown mapping)", ptr(entity.SchemaKey_SingleChoice), nil},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, convertDOSchemaKeyToOpenAPI(tt.input))
+		})
+	}
+}
+
+func TestOpenAPIDatasetIOJobDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobDO2DTO(nil))
+
+	job := &entity.DatasetIOJob{
+		ID:        1,
+		AppID:     ptr(int32(2)),
+		SpaceID:   3,
+		DatasetID: 4,
+		JobType:   entity.JobType(1),
+		Source: &entity.DatasetIOEndpoint{
+			File: &entity.DatasetIOFile{
+				Provider:         entity.StorageProvider(1),
+				Path:             "path",
+				OriginalFileName: ptr("file.txt"),
+			},
+		},
+		Target: &entity.DatasetIOEndpoint{
+			Dataset: &entity.DatasetIODataset{
+				SpaceID:   ptr(int64(1)),
+				DatasetID: 2,
+				VersionID: ptr(int64(3)),
+			},
+		},
+		FieldMappings: []*entity.FieldMapping{
+			{Source: "s", Target: "t"},
+		},
+		Option: &entity.DatasetIOJobOption{
+			OverwriteDataset: ptr(true),
+		},
+		Status: ptr(entity.JobStatus(1)),
+		Progress: &entity.DatasetIOJobProgress{
+			Total:     ptr(int64(10)),
+			Processed: ptr(int64(5)),
+		},
+		Errors: []*entity.ItemErrorGroup{
+			{Summary: ptr("error")},
+		},
+		CreatedBy: ptr("user1"),
+		CreatedAt: ptr(int64(100)),
+		UpdatedBy: ptr("user2"),
+		UpdatedAt: ptr(int64(200)),
+		StartedAt: ptr(int64(150)),
+		EndedAt:   ptr(int64(180)),
+	}
+
+	dto := OpenAPIDatasetIOJobDO2DTO(job)
+	assert.NotNil(t, dto)
+	assert.Equal(t, int64(1), dto.ID)
+	assert.Equal(t, ptr(int32(2)), dto.AppID)
+	assert.Equal(t, int64(3), dto.SpaceID)
+	assert.Equal(t, int64(4), dto.DatasetID)
+	assert.NotNil(t, dto.Source)
+	assert.NotNil(t, dto.Target)
+	assert.Len(t, dto.FieldMappings, 1)
+	assert.NotNil(t, dto.Option)
+	assert.NotNil(t, dto.Status)
+	assert.NotNil(t, dto.Progress)
+	assert.Len(t, dto.Errors, 1)
+	assert.Equal(t, ptr("user1"), dto.CreatedBy)
+	assert.Equal(t, ptr(int64(100)), dto.CreatedAt)
+	assert.Equal(t, ptr("user2"), dto.UpdatedBy)
+	assert.Equal(t, ptr(int64(200)), dto.UpdatedAt)
+	assert.Equal(t, ptr(int64(150)), dto.StartedAt)
+	assert.Equal(t, ptr(int64(180)), dto.EndedAt)
+}
+
+func TestOpenAPIDatasetIOEndpointDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOEndpointDO2DTO(nil))
+
+	endpoint := &entity.DatasetIOEndpoint{
+		File: &entity.DatasetIOFile{
+			Path: "path",
+		},
+		Dataset: &entity.DatasetIODataset{
+			DatasetID: 1,
+		},
+	}
+
+	dto := OpenAPIDatasetIOEndpointDO2DTO(endpoint)
+	assert.NotNil(t, dto)
+	assert.NotNil(t, dto.File)
+	assert.NotNil(t, dto.Dataset)
+}
+
+func TestOpenAPIDatasetIOFileDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOFileDO2DTO(nil))
+
+	file := &entity.DatasetIOFile{
+		Provider:         entity.StorageProvider(1),
+		Path:             "path",
+		Format:           ptr(entity.FileFormat(1)),
+		CompressFormat:   ptr(entity.FileFormat(2)),
+		Files:            []string{"f1", "f2"},
+		OriginalFileName: ptr("file.txt"),
+		DownloadURL:      ptr("url"),
+		ProviderID:       ptr("id"),
+		ProviderAuth: &entity.ProviderAuth{
+			ProviderAccountID: ptr(int64(1)),
+		},
+	}
+
+	dto := OpenAPIDatasetIOFileDO2DTO(file)
+	assert.NotNil(t, dto)
+	assert.Equal(t, "path", dto.Path)
+	assert.Equal(t, []string{"f1", "f2"}, dto.Files)
+	assert.Equal(t, ptr("file.txt"), dto.OriginalFileName)
+	assert.Equal(t, ptr("url"), dto.DownloadURL)
+	assert.Equal(t, ptr("id"), dto.ProviderID)
+	assert.NotNil(t, dto.ProviderAuth)
+}
+
+func TestOpenAPIProviderAuthDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIProviderAuthDO2DTO(nil))
+
+	auth := &entity.ProviderAuth{
+		ProviderAccountID: ptr(int64(1)),
+	}
+
+	dto := OpenAPIProviderAuthDO2DTO(auth)
+	assert.NotNil(t, dto)
+	assert.Equal(t, ptr(int64(1)), dto.ProviderAccountID)
+}
+
+func TestOpenAPIDatasetIODatasetDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIODatasetDO2DTO(nil))
+
+	ds := &entity.DatasetIODataset{
+		SpaceID:   ptr(int64(1)),
+		DatasetID: 2,
+		VersionID: ptr(int64(3)),
+	}
+
+	dto := OpenAPIDatasetIODatasetDO2DTO(ds)
+	assert.NotNil(t, dto)
+	assert.Equal(t, ptr(int64(1)), dto.SpaceID)
+	assert.Equal(t, int64(2), dto.DatasetID)
+	assert.Equal(t, ptr(int64(3)), dto.VersionID)
+}
+
+func TestOpenAPIDatasetIOFieldMappingsDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOFieldMappingsDO2DTO(nil))
+	assert.Nil(t, OpenAPIDatasetIOFieldMappingsDO2DTO([]*entity.FieldMapping{}))
+
+	mappings := []*entity.FieldMapping{
+		{Source: "s1", Target: "t1"},
+		{Source: "s2", Target: "t2"},
+	}
+
+	dtos := OpenAPIDatasetIOFieldMappingsDO2DTO(mappings)
+	assert.Len(t, dtos, 2)
+	assert.Equal(t, "s1", dtos[0].Source)
+	assert.Equal(t, "t1", dtos[0].Target)
+}
+
+func TestOpenAPIDatasetIOJobOptionDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobOptionDO2DTO(nil))
+
+	opt := &entity.DatasetIOJobOption{
+		OverwriteDataset: ptr(true),
+	}
+
+	dto := OpenAPIDatasetIOJobOptionDO2DTO(opt)
+	assert.NotNil(t, dto)
+	assert.Equal(t, ptr(true), dto.OverwriteDataset)
+}
+
+func TestOpenAPIDatasetIOJobProgressDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobProgressDO2DTO(nil))
+
+	progress := &entity.DatasetIOJobProgress{
+		Total:     ptr(int64(10)),
+		Processed: ptr(int64(5)),
+		Added:     ptr(int64(4)),
+		Name:      ptr("p1"),
+		SubProgresses: []*entity.DatasetIOJobProgress{
+			{Total: ptr(int64(2))},
+		},
+	}
+
+	dto := OpenAPIDatasetIOJobProgressDO2DTO(progress)
+	assert.NotNil(t, dto)
+	assert.Equal(t, ptr(int64(10)), dto.Total)
+	assert.Equal(t, ptr(int64(5)), dto.Processed)
+	assert.Equal(t, ptr(int64(4)), dto.Added)
+	assert.Equal(t, ptr("p1"), dto.Name)
+	assert.Len(t, dto.SubProgresses, 1)
+}
+
+func TestOpenAPIDatasetIOJobSubProgressesDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobSubProgressesDO2DTO(nil))
+	assert.Nil(t, OpenAPIDatasetIOJobSubProgressesDO2DTO([]*entity.DatasetIOJobProgress{}))
+
+	progresses := []*entity.DatasetIOJobProgress{
+		{Total: ptr(int64(10))},
+	}
+
+	dtos := OpenAPIDatasetIOJobSubProgressesDO2DTO(progresses)
+	assert.Len(t, dtos, 1)
+	assert.Equal(t, ptr(int64(10)), dtos[0].Total)
+}
+
+func TestOpenAPIDatasetIOJobErrorsDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobErrorsDO2DTO(nil))
+	assert.Nil(t, OpenAPIDatasetIOJobErrorsDO2DTO([]*entity.ItemErrorGroup{}))
+
+	errors := []*entity.ItemErrorGroup{
+		{Summary: ptr("error1")},
+	}
+
+	dtos := OpenAPIDatasetIOJobErrorsDO2DTO(errors)
+	assert.Len(t, dtos, 1)
+	assert.Equal(t, ptr("error1"), dtos[0].Summary)
+}
+
+func TestOpenAPIDatasetIOJobErrorGroupDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobErrorGroupDO2DTO(nil))
+
+	e := &entity.ItemErrorGroup{
+		Type:       ptr(entity.ItemErrorType(1)),
+		Summary:    ptr("error1"),
+		ErrorCount: ptr(int32(2)),
+		Details: []*entity.ItemErrorDetail{
+			{Message: ptr("detail1")},
+		},
+	}
+
+	dto := OpenAPIDatasetIOJobErrorGroupDO2DTO(e)
+	assert.NotNil(t, dto)
+	assert.NotNil(t, dto.Type)
+	assert.Equal(t, ptr("error1"), dto.Summary)
+	assert.Equal(t, ptr(int32(2)), dto.ErrorCount)
+	assert.Len(t, dto.Details, 1)
+}
+
+func TestOpenAPIDatasetIOJobErrorDetailsDO2DTO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobErrorDetailsDO2DTO(nil))
+	assert.Nil(t, OpenAPIDatasetIOJobErrorDetailsDO2DTO([]*entity.ItemErrorDetail{}))
+
+	details := []*entity.ItemErrorDetail{
+		{
+			Message:    ptr("m1"),
+			Index:      ptr(int32(1)),
+			StartIndex: ptr(int32(2)),
+			EndIndex:   ptr(int32(3)),
+		},
+	}
+
+	dtos := OpenAPIDatasetIOJobErrorDetailsDO2DTO(details)
+	assert.Len(t, dtos, 1)
+	assert.Equal(t, ptr("m1"), dtos[0].Message)
+	assert.Equal(t, ptr(int32(1)), dtos[0].Index)
+	assert.Equal(t, ptr(int32(2)), dtos[0].StartIndex)
+	assert.Equal(t, ptr(int32(3)), dtos[0].EndIndex)
+}
+
+func TestOpenAPIDatasetIOJobOptionDTO2DO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIDatasetIOJobOptionDTO2DO(nil))
+
+	opt := &dataset_job.DatasetIOJobOption{
+		OverwriteDataset: ptr(true),
+	}
+
+	do := OpenAPIDatasetIOJobOptionDTO2DO(opt)
+	assert.NotNil(t, do)
+	assert.Equal(t, ptr(true), do.OverwriteDataset)
+}
+
+func TestConvertOpenAPISchemaKeyToDO(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, convertOpenAPISchemaKeyToDO(nil))
+	assert.Equal(t, gptr.Of(entity.SchemaKey_Integer), convertOpenAPISchemaKeyToDO(gptr.Of(openapi_eval_set.SchemaKeyInteger)))
+	assert.Equal(t, gptr.Of(entity.SchemaKey_Float), convertOpenAPISchemaKeyToDO(gptr.Of(openapi_eval_set.SchemaKeyFloat)))
+	assert.Equal(t, gptr.Of(entity.SchemaKey_Bool), convertOpenAPISchemaKeyToDO(gptr.Of(openapi_eval_set.SchemaKeyBool)))
+	assert.Equal(t, gptr.Of(entity.SchemaKey_String), convertOpenAPISchemaKeyToDO(gptr.Of(openapi_eval_set.SchemaKeyString)))
+	assert.Equal(t, gptr.Of(entity.SchemaKey_Trajectory), convertOpenAPISchemaKeyToDO(gptr.Of(openapi_eval_set.SchemaKeyTrajectory)))
+	assert.Equal(t, gptr.Of(entity.SchemaKey_String), convertOpenAPISchemaKeyToDO(gptr.Of(openapi_eval_set.SchemaKey("unknown"))))
+}
+
+func TestOpenAPIFieldWriteOptionDTO2DOs(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, OpenAPIFieldWriteOptionDTO2DOs(nil))
+	assert.Nil(t, OpenAPIFieldWriteOptionDTO2DO(nil))
+
+	fieldName := "field"
+	fieldKey := "key"
+	modality := common.ContentTypeImage
+	strategy := openapi_eval_set.MultiModalStoreStrategy("store")
+	dto := &openapi_eval_set.FieldWriteOption{
+		FieldName:    &fieldName,
+		FieldKey:     &fieldKey,
+		ModalityType: &modality,
+		MultiModalStoreOpt: &openapi_eval_set.MultiModalStoreOption{
+			MultiModalStoreStrategy: &strategy,
+		},
+	}
+
+	got := OpenAPIFieldWriteOptionDTO2DO(dto)
+	if assert.NotNil(t, got) {
+		assert.Equal(t, &fieldName, got.FieldName)
+		assert.Equal(t, &fieldKey, got.FieldKey)
+		assert.NotNil(t, got.MultiModalStoreOpt)
+		assert.Equal(t, entity.ContentType(common.ContentTypeImage), *got.MultiModalStoreOpt.ContentType)
+		assert.Equal(t, entity.MultiModalStoreStrategyStore, *got.MultiModalStoreOpt.MultiModalStoreStrategy)
+	}
+	assert.Len(t, OpenAPIFieldWriteOptionDTO2DOs([]*openapi_eval_set.FieldWriteOption{dto}), 1)
+}
+
+func TestOpenAPIObjectAndMediaConversions(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, ConvertObjectStorageDO2DTO(nil))
+	assert.Nil(t, ConvertAudioDTO2DO(nil))
+	assert.Nil(t, ConvertVideoDTO2DO(nil))
+
+	url := "https://x"
+	uri := "tos://x"
+	name := "media"
+	thumb := "https://thumb"
+	format := "mp3"
+
+	assert.Equal(t, &common.ObjectStorage{URL: &url}, ConvertObjectStorageDO2DTO(&entity.ObjectStorage{URL: &url}))
+	assert.Equal(t, &entity.Audio{URL: &url, Name: &name, URI: &uri}, ConvertAudioDTO2DO(&common.Audio{URL: &url, Name: &name, URI: &uri}))
+	assert.Equal(t, &entity.Video{Name: &name, URL: &url, ThumbURL: &thumb, URI: &uri}, ConvertVideoDTO2DO(&common.Video{Name: &name, URL: &url, ThumbURL: &thumb, URI: &uri}))
+	assert.Equal(t, &common.Video{Name: &name, URL: &url, ThumbURL: &thumb, URI: &uri}, ConvertVideoDO2DTO(&entity.Video{Name: &name, URL: &url, ThumbURL: &thumb, URI: &uri}))
+	assert.Equal(t, &common.Audio{Format: &format, URL: &url, Name: &name, URI: &uri}, ConvertAudioDO2DTO(&entity.Audio{Format: &format, URL: &url, Name: &name, URI: &uri}))
 }

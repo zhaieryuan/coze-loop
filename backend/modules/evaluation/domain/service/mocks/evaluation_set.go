@@ -71,6 +71,22 @@ func (mr *MockIEvaluationSetServiceMockRecorder) CreateEvaluationSet(ctx, param 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateEvaluationSet", reflect.TypeOf((*MockIEvaluationSetService)(nil).CreateEvaluationSet), ctx, param)
 }
 
+// CreateEvaluationSetWithImport mocks base method.
+func (m *MockIEvaluationSetService) CreateEvaluationSetWithImport(ctx context.Context, param *entity.CreateEvaluationSetWithImportParam) (int64, int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateEvaluationSetWithImport", ctx, param)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(int64)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// CreateEvaluationSetWithImport indicates an expected call of CreateEvaluationSetWithImport.
+func (mr *MockIEvaluationSetServiceMockRecorder) CreateEvaluationSetWithImport(ctx, param any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateEvaluationSetWithImport", reflect.TypeOf((*MockIEvaluationSetService)(nil).CreateEvaluationSetWithImport), ctx, param)
+}
+
 // DeleteEvaluationSet mocks base method.
 func (m *MockIEvaluationSetService) DeleteEvaluationSet(ctx context.Context, spaceID, evaluationSetID int64) error {
 	m.ctrl.T.Helper()
@@ -100,6 +116,36 @@ func (mr *MockIEvaluationSetServiceMockRecorder) GetEvaluationSet(ctx, spaceID, 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEvaluationSet", reflect.TypeOf((*MockIEvaluationSetService)(nil).GetEvaluationSet), ctx, spaceID, evaluationSetID, deletedAt)
 }
 
+// GetEvaluationSetIOJob mocks base method.
+func (m *MockIEvaluationSetService) GetEvaluationSetIOJob(ctx context.Context, spaceID, jobID int64) (*entity.DatasetIOJob, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetEvaluationSetIOJob", ctx, spaceID, jobID)
+	ret0, _ := ret[0].(*entity.DatasetIOJob)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetEvaluationSetIOJob indicates an expected call of GetEvaluationSetIOJob.
+func (mr *MockIEvaluationSetServiceMockRecorder) GetEvaluationSetIOJob(ctx, spaceID, jobID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetEvaluationSetIOJob", reflect.TypeOf((*MockIEvaluationSetService)(nil).GetEvaluationSetIOJob), ctx, spaceID, jobID)
+}
+
+// ImportEvaluationSet mocks base method.
+func (m *MockIEvaluationSetService) ImportEvaluationSet(ctx context.Context, param *entity.ImportEvaluationSetParam) (int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ImportEvaluationSet", ctx, param)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ImportEvaluationSet indicates an expected call of ImportEvaluationSet.
+func (mr *MockIEvaluationSetServiceMockRecorder) ImportEvaluationSet(ctx, param any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ImportEvaluationSet", reflect.TypeOf((*MockIEvaluationSetService)(nil).ImportEvaluationSet), ctx, param)
+}
+
 // ListEvaluationSets mocks base method.
 func (m *MockIEvaluationSetService) ListEvaluationSets(ctx context.Context, param *entity.ListEvaluationSetsParam) ([]*entity.EvaluationSet, *int64, *string, error) {
 	m.ctrl.T.Helper()
@@ -115,6 +161,36 @@ func (m *MockIEvaluationSetService) ListEvaluationSets(ctx context.Context, para
 func (mr *MockIEvaluationSetServiceMockRecorder) ListEvaluationSets(ctx, param any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListEvaluationSets", reflect.TypeOf((*MockIEvaluationSetService)(nil).ListEvaluationSets), ctx, param)
+}
+
+// ParseImportSourceFile mocks base method.
+func (m *MockIEvaluationSetService) ParseImportSourceFile(ctx context.Context, param *entity.ParseImportSourceFileParam) (*entity.ParseImportSourceFileResult, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ParseImportSourceFile", ctx, param)
+	ret0, _ := ret[0].(*entity.ParseImportSourceFileResult)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ParseImportSourceFile indicates an expected call of ParseImportSourceFile.
+func (mr *MockIEvaluationSetServiceMockRecorder) ParseImportSourceFile(ctx, param any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ParseImportSourceFile", reflect.TypeOf((*MockIEvaluationSetService)(nil).ParseImportSourceFile), ctx, param)
+}
+
+// ValidateMultiPartData mocks base method.
+func (m *MockIEvaluationSetService) ValidateMultiPartData(ctx context.Context, spaceID int64, previewData []string, storeOption *entity.MultiModalStoreOption) ([]*entity.UploadAttachmentDetail, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ValidateMultiPartData", ctx, spaceID, previewData, storeOption)
+	ret0, _ := ret[0].([]*entity.UploadAttachmentDetail)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ValidateMultiPartData indicates an expected call of ValidateMultiPartData.
+func (mr *MockIEvaluationSetServiceMockRecorder) ValidateMultiPartData(ctx, spaceID, previewData, storeOption any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidateMultiPartData", reflect.TypeOf((*MockIEvaluationSetService)(nil).ValidateMultiPartData), ctx, spaceID, previewData, storeOption)
 }
 
 // QueryItemSnapshotMappings mocks base method.
